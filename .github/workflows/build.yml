@@ -2,151 +2,204 @@ name: Build Teacher Soundboard
 
 on:
   push:
-    branches: [ main ]
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches: [ main ]
-  workflow_dispatch:  # Erlaubt manuelles Auslösen
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: teachersoundboard-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: python -m pip install -r requirements-dev.txt
 
-      - name: Build Windows EXE
+      - name: Test source
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "TeacherSoundboard" soundboard.py
+          python -m unittest discover -s tests -v
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          python soundboard.py --self-test
 
-      - name: Upload Windows artifact
+      - name: Build application
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed `
+            --name TeacherSoundboard `
+            --version-file installer/windows/version_info.txt `
+            --collect-submodules pynput `
+            soundboard.py
+
+      - name: Test packaged application
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          & .\dist\TeacherSoundboard\TeacherSoundboard.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Packaged self-test failed with exit code $LASTEXITCODE" }
+
+      - name: Package Windows downloads
+        shell: pwsh
+        run: |
+          Compress-Archive -Path .\dist\TeacherSoundboard -DestinationPath .\dist\TeacherSoundboard-Windows-x64.zip
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          & $iscc .\installer\windows\TeacherSoundboard.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer build failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path .\dist\TeacherSoundboard-Windows-x64-Setup.exe)) { throw "Installer output missing" }
+
+      - name: Upload Windows downloads
         uses: actions/upload-artifact@v4
         with:
-          name: TeacherSoundboard-Windows
-          path: dist/TeacherSoundboard.exe
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build macOS App
-        run: |
-          pyinstaller --noconfirm --onefile --windowed --name "TeacherSoundboard" --osx-bundle-identifier "com.teachersoundboard.app" soundboard.py
-
-      - name: Create DMG
-        run: |
-          # Erstelle einen einfachen DMG
-          mkdir -p dmg_contents
-          cp -r dist/TeacherSoundboard.app dmg_contents/ 2>/dev/null || cp dist/TeacherSoundboard dmg_contents/
-          hdiutil create -volname "TeacherSoundboard" -srcfolder dmg_contents -ov -format UDZO dist/TeacherSoundboard.dmg || true
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: TeacherSoundboard-macOS
+          name: TeacherSoundboard-Windows-x64
+          if-no-files-found: error
+          retention-days: 14
           path: |
-            dist/TeacherSoundboard.app
-            dist/TeacherSoundboard
-            dist/TeacherSoundboard.dmg
+            dist/TeacherSoundboard-Windows-x64-Setup.exe
+            dist/TeacherSoundboard-Windows-x64.zip
 
-  build-linux:
-    runs-on: ubuntu-latest
+  macos:
+    name: macOS ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            label: Apple-Silicon
+            arch: arm64
+          - runner: macos-15-intel
+            label: Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libxcb-xinerama0 \
-            libxcb-cursor0 \
-            libxkbcommon-x11-0 \
-            libegl1 \
-            libgl1-mesa-glx \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-shape0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Verify runner architecture
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          python -c "import platform; print(platform.platform(), platform.machine())"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+        run: python -m pip install -r requirements-dev.txt
 
-      - name: Build Linux Binary
+      - name: Test source
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "teachersoundboard" soundboard.py
+          python -m unittest discover -s tests -v
+          python soundboard.py --self-test
 
-      - name: Upload Linux artifact
+      - name: Build application
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed \
+            --name TeacherSoundboard \
+            --osx-bundle-identifier de.floriannowak.teachersoundboard \
+            --target-architecture "${{ matrix.arch }}" \
+            --collect-submodules pynput \
+            soundboard.py
+
+      - name: Finalize and sign app bundle
+        run: |
+          app="dist/TeacherSoundboard.app"
+          test -d "$app"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.3.0" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 4.3.0" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$app/Contents/Info.plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$app/Contents/Info.plist"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Test packaged application
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/TeacherSoundboard.app/Contents/MacOS/TeacherSoundboard --self-test
+
+      - name: Package macOS downloads
+        run: |
+          label="${{ matrix.label }}"
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/TeacherSoundboard.app "dist/TeacherSoundboard-macOS-${label}.zip"
+          mkdir -p build/dmg
+          cp -R dist/TeacherSoundboard.app build/dmg/
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname "Teacher Soundboard" \
+            -srcfolder build/dmg -ov -format UDZO \
+            "dist/TeacherSoundboard-macOS-${label}.dmg"
+          hdiutil verify "dist/TeacherSoundboard-macOS-${label}.dmg"
+
+      - name: Upload macOS downloads
         uses: actions/upload-artifact@v4
         with:
-          name: TeacherSoundboard-Linux
-          path: dist/teachersoundboard
+          name: TeacherSoundboard-macOS-${{ matrix.label }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/TeacherSoundboard-macOS-${{ matrix.label }}.dmg
+            dist/TeacherSoundboard-macOS-${{ matrix.label }}.zip
 
-  # Release erstellen wenn ein Tag gepusht wird
   release:
-    needs: [build-windows, build-macos, build-linux]
-    runs-on: ubuntu-latest
+    name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
+      - name: Download packages
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Display structure
-        run: ls -la artifacts/
-
-      - name: Prepare release files
+      - name: Collect release files
         run: |
           mkdir release
-          # Windows
-          cp artifacts/TeacherSoundboard-Windows/TeacherSoundboard.exe release/TeacherSoundboard-Windows.exe || true
-          # macOS
-          cd artifacts/TeacherSoundboard-macOS && zip -r ../../release/TeacherSoundboard-macOS.zip . && cd ../..
-          # Linux
-          cp artifacts/TeacherSoundboard-Linux/teachersoundboard release/TeacherSoundboard-Linux || true
-          chmod +x release/TeacherSoundboard-Linux || true
+          find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.dmg' \) -exec cp {} release/ \;
+          test "$(find release -type f | wc -l)" -eq 6
+          ls -lh release
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: release/*
-          generate_release_notes: true
+      - name: Create GitHub release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --generate-notes --title "Teacher Soundboard $GITHUB_REF_NAME"
+          fi

@@ -1,22 +1,32 @@
+from __future__ import annotations
+
+import ctypes
 import json
 import os
 import math
+import platform
 import random
 import sys
-from dataclasses import dataclass, asdict
+import tempfile
+import threading
+import traceback
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Callable
 
-from PyQt6.QtCore import Qt, QPoint, QPointF, QUrl, QRectF, QTimer, pyqtSignal, QThread
+from PyQt6.QtCore import (
+    PYQT_VERSION_STR, QT_VERSION_STR, QEvent, QLockFile, QPoint, QPointF,
+    QRectF, QTimer, QUrl, Qt, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QAction, QPixmap, QGuiApplication, QPainter, QPen, QBrush,
-    QRadialGradient, QColor, QFont, QPainterPath, QTransform, QKeySequence, QShortcut
+    QRadialGradient, QColor, QFont, QPainterPath, QTransform, QKeySequence,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QLabel,
     QMenu, QHBoxLayout, QVBoxLayout, QMessageBox, QDialog, QGridLayout,
     QLineEdit, QPushButton, QFrame, QSlider, QComboBox, QSpinBox, QCheckBox,
-    QGroupBox, QKeySequenceEdit, QToolTip
+    QGroupBox
 )
 
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
@@ -24,7 +34,7 @@ from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 
 APP_NAME = "Teacher Soundboard"
-VERSION = "v4.2.0"
+VERSION = "v4.3.0"
 CONFIG_FILE = "soundboard_config.json"
 
 DEFAULT_BUTTONS = 6
@@ -50,23 +60,86 @@ CLIP_CUSTOM_IMAGES_TO_CIRCLE = True
 # Default hotkeys for buttons (F1-F8 as default, easily reachable)
 DEFAULT_HOTKEYS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"]
 
-# Try to import pynput for global hotkeys (cross-platform)
+# Try to import pynput for global hotkeys. Importing it can fail for reasons
+# other than a missing package (for example an unavailable platform backend),
+# so the app must remain usable without it.
 GLOBAL_HOTKEYS_AVAILABLE = False
+GLOBAL_HOTKEYS_ERROR = ""
+pynput_keyboard = None
 try:
     from pynput import keyboard as pynput_keyboard
     GLOBAL_HOTKEYS_AVAILABLE = True
-except ImportError:
-    pass
+except Exception as exc:  # pragma: no cover - depends on the host platform
+    GLOBAL_HOTKEYS_ERROR = str(exc)
+
+
+def platform_config_dir(
+    platform_name: str | None = None,
+    environ: dict[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return the native per-user configuration directory for a platform."""
+    platform_name = platform_name or sys.platform
+    environ = environ if environ is not None else os.environ
+    home = home or Path.home()
+
+    override = environ.get("TEACHER_SOUNDBOARD_CONFIG_DIR")
+    if override:
+        return Path(override)
+
+    if platform_name.startswith("win"):
+        root = environ.get("APPDATA")
+        return Path(root) / "TeacherSoundboard" if root else home / "AppData" / "Roaming" / "TeacherSoundboard"
+    if platform_name == "darwin":
+        return home / "Library" / "Application Support" / "TeacherSoundboard"
+
+    root = environ.get("XDG_CONFIG_HOME")
+    return Path(root) / "TeacherSoundboard" if root else home / ".config" / "TeacherSoundboard"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically so an interrupted save cannot corrupt config."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def get_config_path() -> Path:
-    if os.name == "nt":
-        root = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        cfg_dir = Path(root) / "TeacherSoundboard"
-    else:
-        cfg_dir = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "TeacherSoundboard"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    return cfg_dir / CONFIG_FILE
+    cfg_dir = platform_config_dir()
+    try:
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Starting without persistent settings is preferable to crashing when a
+        # profile directory is temporarily unavailable or read-only.
+        cfg_dir = Path(tempfile.gettempdir()) / "TeacherSoundboard"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = cfg_dir / CONFIG_FILE
+
+    # v4.2 stored macOS settings under ~/.config. Copy them once to the native
+    # Application Support location without deleting the old file.
+    if sys.platform == "darwin" and not config_path.exists():
+        legacy = Path.home() / ".config" / "TeacherSoundboard" / CONFIG_FILE
+        if legacy.is_file():
+            try:
+                data = json.loads(legacy.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    atomic_write_json(config_path, data)
+            except (OSError, ValueError, TypeError):
+                pass
+
+    return config_path
 
 
 @dataclass
@@ -84,9 +157,93 @@ class AppConfig:
     burst_seconds: float = 1.6
     visible_buttons: int = DEFAULT_BUTTONS
     audio_device: str = ""  # empty = system default, else device description
+    audio_device_id: str = ""  # stable OS device id; description is migration fallback
     global_hotkeys_enabled: bool = True  # enable/disable global hotkeys
     stop_hotkey: str = "Escape"  # global hotkey to stop playback
-    buttons: list = None
+    buttons: list[ButtonConfig] = field(default_factory=list)
+
+
+def default_buttons() -> list[ButtonConfig]:
+    return [ButtonConfig(hotkey=DEFAULT_HOTKEYS[i]) for i in range(MAX_BUTTONS)]
+
+
+def _bounded_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(parsed):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _bounded_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def parse_config(data) -> AppConfig:
+    """Parse settings defensively and preserve explicitly cleared hotkeys."""
+    if not isinstance(data, dict):
+        return AppConfig(buttons=default_buttons())
+
+    raw_buttons = data.get("buttons")
+    raw_buttons = raw_buttons if isinstance(raw_buttons, list) else []
+    buttons: list[ButtonConfig] = []
+    for index in range(MAX_BUTTONS):
+        raw = raw_buttons[index] if index < len(raw_buttons) and isinstance(raw_buttons[index], dict) else {}
+        default_hotkey = DEFAULT_HOTKEYS[index]
+        hotkey = raw.get("hotkey", default_hotkey)
+        buttons.append(ButtonConfig(
+            media_path=str(raw.get("media_path") or ""),
+            image_path=str(raw.get("image_path") or ""),
+            hotkey=str(hotkey or ""),
+        ))
+
+    dock_edge = str(data.get("dock_edge") or "top").lower().strip()
+    if dock_edge not in ("left", "right", "top", "bottom"):
+        dock_edge = "top"
+
+    video_mode = str(data.get("video_mode") or "fullscreen_burst").lower().strip()
+    if video_mode not in ("large", "fullscreen", "fullscreen_burst"):
+        video_mode = "fullscreen_burst"
+
+    enabled = data.get("global_hotkeys_enabled", True)
+    if not isinstance(enabled, bool):
+        enabled = True
+
+    stop_hotkey = data.get("stop_hotkey", "Escape")
+    stop_hotkey = str(stop_hotkey or "")
+
+    return AppConfig(
+        dock_edge=dock_edge,
+        volume=_bounded_float(data.get("volume"), 0.75, 0.0, 1.0),
+        video_mode=video_mode,
+        burst_seconds=_bounded_float(data.get("burst_seconds"), 1.6, 0.2, 10.0),
+        visible_buttons=_bounded_int(data.get("visible_buttons"), DEFAULT_BUTTONS, 1, MAX_BUTTONS),
+        audio_device=str(data.get("audio_device") or ""),
+        audio_device_id=str(data.get("audio_device_id") or ""),
+        global_hotkeys_enabled=enabled,
+        stop_hotkey=stop_hotkey,
+        buttons=buttons,
+    )
+
+
+def macos_accessibility_trusted() -> bool | None:
+    """Return whether macOS allows keyboard monitoring, or None if unknown."""
+    if sys.platform != "darwin":
+        return True
+    try:  # pragma: no cover - only available on macOS
+        framework = ctypes.cdll.LoadLibrary(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        framework.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(framework.AXIsProcessTrusted())
+    except Exception:
+        return None
 
 
 # ---------------- Global Hotkey Manager ----------------
@@ -94,10 +251,11 @@ class GlobalHotkeyManager:
     """Cross-platform global hotkey manager using pynput."""
     
     def __init__(self):
-        self.listener: Optional[pynput_keyboard.GlobalHotKeys] = None
+        self.listener = None
         self.callbacks: dict[str, Callable] = {}
         self.enabled = False
         self._pending_restart = False
+        self.last_error = GLOBAL_HOTKEYS_ERROR
     
     def _normalize_hotkey(self, hotkey: str) -> str:
         """Normalize hotkey string for pynput format."""
@@ -160,6 +318,10 @@ class GlobalHotkeyManager:
         normalized = self._normalize_hotkey(hotkey)
         if not normalized:
             return False
+
+        if normalized in self.callbacks:
+            self.last_error = f"Doppelt vergebener Hotkey: {hotkey}"
+            return False
         
         self.callbacks[normalized] = callback
         self._pending_restart = True
@@ -179,10 +341,13 @@ class GlobalHotkeyManager:
         self.callbacks.clear()
         self._pending_restart = True
     
-    def start(self):
+    def start(self) -> bool:
         """Start listening for global hotkeys."""
         if not GLOBAL_HOTKEYS_AVAILABLE or not self.callbacks:
-            return
+            self.enabled = False
+            if not GLOBAL_HOTKEYS_AVAILABLE and not self.last_error:
+                self.last_error = "Die globale Hotkey-Komponente ist nicht verfügbar."
+            return False
         
         self.stop()
         
@@ -191,24 +356,35 @@ class GlobalHotkeyManager:
             self.listener.start()
             self.enabled = True
             self._pending_restart = False
+            self.last_error = ""
+            return True
         except Exception as e:
-            print(f"Failed to start global hotkeys: {e}")
+            self.last_error = str(e)
+            print(f"Failed to start global hotkeys: {e}", file=sys.stderr)
             self.enabled = False
+            self.listener = None
+            return False
     
     def stop(self):
         """Stop listening for global hotkeys."""
-        if self.listener:
+        listener = self.listener
+        self.listener = None
+        if listener:
             try:
-                self.listener.stop()
+                listener.stop()
+                if listener is not threading.current_thread():
+                    listener.join(timeout=0.75)
             except Exception:
                 pass
-            self.listener = None
         self.enabled = False
     
     def restart_if_needed(self):
         """Restart listener if there are pending changes."""
-        if self._pending_restart and self.callbacks:
-            self.start()
+        if self._pending_restart:
+            if self.callbacks:
+                self.start()
+            else:
+                self.stop()
 
 
 # ---------------- Video Overlay (Safety) ----------------
@@ -236,14 +412,14 @@ class VideoOverlay(QWidget):
         self._burst_timer.setSingleShot(True)
         self._burst_timer.timeout.connect(self._end_burst_to_large)
 
-        self._current_screen_geom = None
+        self._current_screen = None
         self.video.installEventFilter(self)
 
     def set_player(self, player: QMediaPlayer):
         player.setVideoOutput(self.video)
 
-    def show_video(self, screen_geom, mode: str, burst_seconds: float = 1.6):
-        self._current_screen_geom = screen_geom
+    def show_video(self, screen, mode: str, burst_seconds: float = 1.6):
+        self._current_screen = screen
         mode = (mode or "large").lower().strip()
         if mode not in ("large", "fullscreen", "fullscreen_burst"):
             mode = "large"
@@ -251,35 +427,49 @@ class VideoOverlay(QWidget):
         self._burst_timer.stop()
 
         if mode == "fullscreen":
-            self._show_fullscreen_on_geom(screen_geom)
+            self._show_fullscreen_on_screen(screen)
             return
 
         if mode == "fullscreen_burst":
-            self._show_fullscreen_on_geom(screen_geom)
+            self._show_fullscreen_on_screen(screen)
             ms = max(200, int(burst_seconds * 1000))
             self._burst_timer.start(ms)
             return
 
-        self._show_large_on_geom(screen_geom)
+        self._show_large_on_screen(screen)
 
     def hide_video(self):
         self._burst_timer.stop()
-        self.showNormal()
         self.hide()
+        self.setWindowState(Qt.WindowState.WindowNoState)
 
-    def _show_fullscreen_on_geom(self, g):
+    def _place_on_screen(self, screen):
+        if screen is None:
+            return
+        # Force creation of a native handle before assigning a monitor. This is
+        # considerably more reliable than geometry-only placement on macOS.
+        self.winId()
+        handle = self.windowHandle()
+        if handle and handle.screen() is not screen:
+            handle.setScreen(screen)
+
+    def _show_fullscreen_on_screen(self, screen):
         self._burst_timer.stop()
-        self.showNormal()
-        self.setGeometry(g)
+        self.hide()
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self._place_on_screen(screen)
+        self.setGeometry(screen.geometry())
         self.show()
         self.raise_()
         self.activateWindow()
         self.setFocus()
-        self.showFullScreen()
 
-    def _show_large_on_geom(self, g):
+    def _show_large_on_screen(self, screen):
         self._burst_timer.stop()
-        self.showNormal()
+        self.hide()
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self._place_on_screen(screen)
+        g = screen.availableGeometry()
 
         max_w = int(g.width() * 0.75)
         max_h = int(g.height() * 0.75)
@@ -300,9 +490,9 @@ class VideoOverlay(QWidget):
         self.setFocus()
 
     def _end_burst_to_large(self):
-        if not self._current_screen_geom:
+        if not self._current_screen:
             return
-        self._show_large_on_geom(self._current_screen_geom)
+        self._show_large_on_screen(self._current_screen)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Space, Qt.Key.Key_Backspace):
@@ -312,7 +502,7 @@ class VideoOverlay(QWidget):
         super().keyPressEvent(event)
 
     def eventFilter(self, obj, event):
-        if obj is self.video and event.type() == event.Type.MouseButtonPress:
+        if obj is self.video and event.type() == QEvent.Type.MouseButtonPress:
             self.closeRequested.emit()
             return True
         return super().eventFilter(obj, event)
@@ -435,6 +625,10 @@ def short_path(p: str, max_len: int = 55) -> str:
     return s[:left] + " … " + s[-right:]
 
 
+def ui_modifier_label() -> str:
+    return "Cmd" if sys.platform == "darwin" else "Strg"
+
+
 # ---------------- Hotkey Edit Widget ----------------
 class HotkeyEdit(QLineEdit):
     """Custom widget for capturing keyboard shortcuts."""
@@ -496,17 +690,19 @@ class HotkeyEdit(QLineEdit):
         mods = event.modifiers()
         
         if mods & Qt.KeyboardModifier.ControlModifier:
-            parts.append("Ctrl")
+            # Qt maps the macOS Command key to ControlModifier.
+            parts.append("Cmd" if sys.platform == "darwin" else "Ctrl")
         if mods & Qt.KeyboardModifier.AltModifier:
             parts.append("Alt")
         if mods & Qt.KeyboardModifier.ShiftModifier:
             parts.append("Shift")
         if mods & Qt.KeyboardModifier.MetaModifier:
-            parts.append("Meta")
+            # Conversely, the physical macOS Control key is MetaModifier.
+            parts.append("Ctrl" if sys.platform == "darwin" else "Meta")
         
         # Get key name
         key_seq = QKeySequence(key)
-        key_str = key_seq.toString()
+        key_str = key_seq.toString(QKeySequence.SequenceFormat.PortableText)
         
         if key_str:
             parts.append(key_str)
@@ -547,7 +743,11 @@ class ManageDialog(QDialog):
 
         self.setWindowTitle(f"{APP_NAME} – Verwaltung ({VERSION})")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        self.resize(1200, 700)
+        available = parent.current_screen().availableGeometry()
+        self.resize(
+            max(760, min(1200, available.width() - 60)),
+            max(560, min(700, available.height() - 60)),
+        )
 
         root = QVBoxLayout(self)
 
@@ -555,15 +755,20 @@ class ManageDialog(QDialog):
         header.setStyleSheet("font-size: 18px; font-weight: 700;")
         root.addWidget(header)
 
-        tip = QLabel("Tipp: Wenn du nichts hörst, prüfe auch Windows → Lautstärkemixer (App evtl. stumm).")
+        tip = QLabel("Tipp: Wenn du nichts hörst, prüfe die Systemlautstärke und das unten gewählte Ausgabegerät.")
         tip.setStyleSheet("color: #444;")
         root.addWidget(tip)
 
-        sub = QLabel("Menü: Rechtsklick auf Münze (oder STRG+Rechtsklick). Drag: ALT+Ziehen.")
+        sub = QLabel(
+            f"Menü: Rechtsklick auf Münze (oder {ui_modifier_label()}+Rechtsklick). "
+            "Verschieben: ALT+Ziehen."
+        )
         sub.setStyleSheet("color: #666;")
         root.addWidget(sub)
 
-        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFrameShadow(QFrame.Shadow.Sunken)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
         root.addWidget(line)
 
         # ---- Global Settings Row 1 ----
@@ -619,7 +824,8 @@ class ManageDialog(QDialog):
         self.global_hotkeys_check = QCheckBox("Globale Hotkeys aktivieren")
         self.global_hotkeys_check.setToolTip(
             "Wenn aktiviert, funktionieren Hotkeys auch wenn andere Programme im Fokus sind.\n"
-            "Erfordert 'pynput' Library (pip install pynput)."
+            "Unter macOS muss Teacher Soundboard zusätzlich unter Datenschutz & Sicherheit → "
+            "Bedienungshilfen erlaubt werden."
         )
         self.global_hotkeys_check.stateChanged.connect(self._on_global_hotkeys_changed)
         hotkey_layout.addWidget(self.global_hotkeys_check)
@@ -643,7 +849,11 @@ class ManageDialog(QDialog):
         btn_reset_hotkeys = QPushButton("Standard-Hotkeys (F1-F8)")
         btn_reset_hotkeys.clicked.connect(self._reset_hotkeys_to_default)
         hotkey_layout.addWidget(btn_reset_hotkeys)
-        
+
+        self.hotkey_status_label = QLabel("")
+        self.hotkey_status_label.setWordWrap(True)
+        hotkey_layout.addWidget(self.hotkey_status_label, 1)
+
         hotkey_layout.addStretch(1)
 
         # ---- Hotkey info label ----
@@ -655,7 +865,9 @@ class ManageDialog(QDialog):
         hotkey_info.setWordWrap(True)
         root.addWidget(hotkey_info)
 
-        line2 = QFrame(); line2.setFrameShape(QFrame.Shape.HLine); line2.setFrameShadow(QFrame.Shadow.Sunken)
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setFrameShadow(QFrame.Shadow.Sunken)
         root.addWidget(line2)
 
         # ---- Button Grid ----
@@ -692,10 +904,14 @@ class ManageDialog(QDialog):
             grid.addWidget(prev, row, 1)
             self.preview_labels.append(prev)
 
-            media_edit = QLineEdit(); media_edit.setReadOnly(True)
-            img_edit = QLineEdit(); img_edit.setReadOnly(True)
-            grid.addWidget(media_edit, row, 2); grid.addWidget(img_edit, row, 3)
-            self.media_edits.append(media_edit); self.image_edits.append(img_edit)
+            media_edit = QLineEdit()
+            media_edit.setReadOnly(True)
+            img_edit = QLineEdit()
+            img_edit.setReadOnly(True)
+            grid.addWidget(media_edit, row, 2)
+            grid.addWidget(img_edit, row, 3)
+            self.media_edits.append(media_edit)
+            self.image_edits.append(img_edit)
 
             # Hotkey edit
             hotkey_edit = HotkeyEdit()
@@ -759,12 +975,14 @@ class ManageDialog(QDialog):
         # device list
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
-        self.device_combo.addItem("Standard (Windows/System)", "")
+        self.device_combo.addItem("Standard (System)", "")
         devices = self.host.list_audio_devices()
-        for d in devices:
-            self.device_combo.addItem(d, d)
-        current = self.host.cfg.audio_device or ""
+        for device_id, description in devices:
+            self.device_combo.addItem(description, device_id)
+        current = self.host.cfg.audio_device_id or ""
         ix = self.device_combo.findData(current)
+        if ix < 0 and self.host.cfg.audio_device:
+            ix = self.device_combo.findText(self.host.cfg.audio_device)
         if ix < 0:
             ix = 0
         self.device_combo.setCurrentIndex(ix)
@@ -787,6 +1005,11 @@ class ManageDialog(QDialog):
         self.global_hotkeys_check.blockSignals(True)
         self.global_hotkeys_check.setChecked(self.host.cfg.global_hotkeys_enabled)
         self.global_hotkeys_check.blockSignals(False)
+        status_text, status_ok = self.host.global_hotkey_status()
+        self.hotkey_status_label.setText(status_text)
+        self.hotkey_status_label.setStyleSheet(
+            "color: #176b35; font-weight: 600;" if status_ok else "color: #9a4d00; font-weight: 600;"
+        )
         
         # Stop hotkey
         self.stop_hotkey_edit.setHotkey(self.host.cfg.stop_hotkey)
@@ -812,8 +1035,9 @@ class ManageDialog(QDialog):
         self.host.set_volume(value / 100.0)
 
     def _on_device_changed(self, _):
-        dev = self.device_combo.currentData()
-        self.host.set_audio_device(dev or "")
+        device_id = self.device_combo.currentData()
+        description = "" if not device_id else self.device_combo.currentText()
+        self.host.set_audio_device(device_id or "", description)
 
     def _on_mode_changed(self, _):
         mode = self.mode_combo.currentData()
@@ -833,9 +1057,7 @@ class ManageDialog(QDialog):
         self.host.set_button_hotkey(index, hotkey)
 
     def _reset_hotkeys_to_default(self):
-        for i in range(MAX_BUTTONS):
-            self.host.set_button_hotkey(i, DEFAULT_HOTKEYS[i] if i < len(DEFAULT_HOTKEYS) else "")
-        self.host.set_stop_hotkey("Escape")
+        self.host.reset_hotkeys_to_default()
         self.refresh()
 
 
@@ -857,7 +1079,10 @@ class CoinBar(QWidget):
             pm = self.host.coin_pixmap(i, int(coin.width()))
             p.drawPixmap(int(round(coin.x())), int(round(coin.y())), pm)
 
-            if self.host.current_index == i and self.host.player.playbackState().name == "PlayingState":
+            if (
+                self.host.current_index == i
+                and self.host.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            ):
                 ring = QRectF(coin).adjusted(-3, -3, 3, 3)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(QColor(0, 200, 255, 200), 4))
@@ -869,7 +1094,8 @@ class CoinBar(QWidget):
         gp = event.globalPosition().toPoint()
         lp = event.position().toPoint()
 
-        if event.button() == Qt.MouseButton.RightButton and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        shortcut_modifiers = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        if event.button() == Qt.MouseButton.RightButton and (event.modifiers() & shortcut_modifiers):
             self.host.open_window_menu(gp)
             return
 
@@ -914,7 +1140,7 @@ class SoundboardWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} {VERSION}")
         self.setWindowFlags(
-            Qt.WindowType.Tool |
+            Qt.WindowType.Window |
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint
         )
@@ -924,10 +1150,12 @@ class SoundboardWindow(QMainWindow):
         self._drag_offset = QPoint(0, 0)
 
         self.config_path = get_config_path()
+        self.last_config_error = ""
         self.cfg = self.load_config()
 
         self.current_index: int | None = None
         self.current_is_video = False
+        self._handling_media_error = False
 
         self.coin_sizes = [64] * MAX_BUTTONS
         self.slot_size = 72
@@ -935,6 +1163,8 @@ class SoundboardWindow(QMainWindow):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
+        self.media_devices = QMediaDevices(self)
+        self.media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
 
         # Apply device + volume right away
         self.apply_audio_device()
@@ -963,31 +1193,70 @@ class SoundboardWindow(QMainWindow):
         self.apply_dock_edge(self.cfg.dock_edge, snap_now=False)
         self.snap_to_edge(self.cfg.dock_edge)
 
+        app = QApplication.instance()
+        if app:
+            app.screenAdded.connect(self._on_screen_added)
+            app.screenRemoved.connect(self._schedule_reposition)
+            for screen in app.screens():
+                screen.availableGeometryChanged.connect(self._schedule_reposition)
+        QTimer.singleShot(0, self._attach_window_screen_signal)
+
     def _setup_global_hotkeys(self):
         """Setup global hotkeys from config."""
-        if not GLOBAL_HOTKEYS_AVAILABLE or not self.cfg.global_hotkeys_enabled:
+        self.hotkey_manager.stop()
+        self.hotkey_manager.clear_all()
+        self.hotkey_manager.last_error = ""
+
+        if not self.cfg.global_hotkeys_enabled:
+            return
+        if not GLOBAL_HOTKEYS_AVAILABLE:
+            self.hotkey_manager.last_error = GLOBAL_HOTKEYS_ERROR or "Hotkey-Komponente nicht verfügbar."
+            return
+        if macos_accessibility_trusted() is False:
+            self.hotkey_manager.last_error = (
+                "macOS blockiert globale Hotkeys. Erlaube Teacher Soundboard unter "
+                "Datenschutz & Sicherheit → Bedienungshilfen."
+            )
             self.hotkey_manager.stop()
             return
-        
-        self.hotkey_manager.clear_all()
-        
+
+        registration_error = ""
+
         # Register button hotkeys
-        for i, btn_cfg in enumerate(self.cfg.buttons):
+        for i, btn_cfg in enumerate(self.cfg.buttons[:self.visible_count()]):
             if btn_cfg.hotkey:
                 idx = i  # capture index
-                self.hotkey_manager.register(
+                registered = self.hotkey_manager.register(
                     btn_cfg.hotkey,
                     lambda ix=idx: self.hotkeyTriggered.emit(ix)
                 )
+                if not registered:
+                    registration_error = self.hotkey_manager.last_error
         
         # Register stop hotkey
         if self.cfg.stop_hotkey:
-            self.hotkey_manager.register(
+            registered = self.hotkey_manager.register(
                 self.cfg.stop_hotkey,
                 lambda: self.stopTriggered.emit()
             )
+            if not registered:
+                registration_error = self.hotkey_manager.last_error
         
-        self.hotkey_manager.start()
+        started = self.hotkey_manager.start()
+        if started and registration_error:
+            self.hotkey_manager.last_error = registration_error
+
+    def global_hotkey_status(self) -> tuple[str, bool]:
+        if not self.cfg.global_hotkeys_enabled:
+            return "Globale Hotkeys sind deaktiviert; lokale Tasten funktionieren weiterhin.", True
+        if not self.hotkey_manager.callbacks and not self.hotkey_manager.last_error:
+            return "Es sind keine globalen Hotkeys konfiguriert.", True
+        if self.hotkey_manager.enabled and not self.hotkey_manager.last_error:
+            return "Globale Hotkeys sind aktiv.", True
+        if self.hotkey_manager.enabled:
+            return f"Globale Hotkeys sind teilweise aktiv. {self.hotkey_manager.last_error}", False
+        detail = self.hotkey_manager.last_error or "Globale Hotkeys konnten nicht gestartet werden."
+        return detail, False
 
     def _on_hotkey_triggered(self, index: int):
         """Handle hotkey trigger (thread-safe via signal)."""
@@ -999,6 +1268,17 @@ class SoundboardWindow(QMainWindow):
         self.cfg.global_hotkeys_enabled = enabled
         self.save_config()
         self._setup_global_hotkeys()
+        if enabled and macos_accessibility_trusted() is False:
+            QMessageBox.information(
+                self,
+                "macOS-Freigabe erforderlich",
+                "Damit globale Hotkeys funktionieren, öffne Systemeinstellungen → Datenschutz & "
+                "Sicherheit → Bedienungshilfen und erlaube dort Teacher Soundboard.\n\n"
+                "Die App bleibt auch ohne diese Freigabe vollständig per Mausklick und mit lokalen "
+                "Tasten bedienbar.",
+            )
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
 
     def set_stop_hotkey(self, hotkey: str):
         """Set the stop playback hotkey."""
@@ -1013,31 +1293,60 @@ class SoundboardWindow(QMainWindow):
             self.save_config()
             self._setup_global_hotkeys()
 
+    def reset_hotkeys_to_default(self):
+        for index, hotkey in enumerate(DEFAULT_HOTKEYS):
+            self.cfg.buttons[index].hotkey = hotkey
+        self.cfg.stop_hotkey = "Escape"
+        self.save_config()
+        self._setup_global_hotkeys()
+
     # ---- audio devices
-    def list_audio_devices(self) -> list[str]:
+    @staticmethod
+    def _audio_device_id(device) -> str:
         try:
-            return [d.description() for d in QMediaDevices.audioOutputs()]
+            raw = bytes(device.id())
+            if raw:
+                return raw.hex()
+        except Exception:
+            pass
+        return f"description:{device.description()}"
+
+    def list_audio_devices(self) -> list[tuple[str, str]]:
+        try:
+            return [(self._audio_device_id(device), device.description()) for device in QMediaDevices.audioOutputs()]
         except Exception:
             return []
 
     def apply_audio_device(self):
         try:
-            wanted = (self.cfg.audio_device or "").strip()
-            if not wanted:
+            wanted_id = (self.cfg.audio_device_id or "").strip()
+            wanted_description = (self.cfg.audio_device or "").strip()
+            if not wanted_id and not wanted_description:
                 self.audio.setDevice(QMediaDevices.defaultAudioOutput())
                 return
-            for d in QMediaDevices.audioOutputs():
-                if d.description() == wanted:
-                    self.audio.setDevice(d)
+            for device in QMediaDevices.audioOutputs():
+                device_id = self._audio_device_id(device)
+                if (wanted_id and device_id == wanted_id) or (
+                    not wanted_id and wanted_description and device.description() == wanted_description
+                ):
+                    self.audio.setDevice(device)
+                    self.cfg.audio_device_id = device_id
+                    self.cfg.audio_device = device.description()
                     return
             self.audio.setDevice(QMediaDevices.defaultAudioOutput())
         except Exception:
             pass
 
-    def set_audio_device(self, desc: str):
-        self.cfg.audio_device = (desc or "").strip()
+    def set_audio_device(self, device_id: str, description: str = ""):
+        self.cfg.audio_device_id = (device_id or "").strip()
+        self.cfg.audio_device = (description or "").strip()
         self.apply_audio_device()
         self.save_config()
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
+
+    def _on_audio_outputs_changed(self):
+        self.apply_audio_device()
         if self.manager_dialog:
             self.manager_dialog.refresh()
 
@@ -1048,6 +1357,25 @@ class SoundboardWindow(QMainWindow):
         except Exception:
             n = DEFAULT_BUTTONS
         return max(1, min(MAX_BUTTONS, n))
+
+    def _attach_window_screen_signal(self):
+        handle = self.windowHandle()
+        if handle:
+            handle.screenChanged.connect(self._schedule_reposition)
+
+    def _on_screen_added(self, screen):
+        screen.availableGeometryChanged.connect(self._schedule_reposition)
+        self._schedule_reposition()
+
+    def _schedule_reposition(self, *_args):
+        QTimer.singleShot(0, self._reposition_after_screen_change)
+
+    def _reposition_after_screen_change(self):
+        if not self.isVisible():
+            return
+        self.compute_sizes_for_edge(self.cfg.dock_edge)
+        self.set_window_size_for_edge(self.cfg.dock_edge)
+        self.snap_to_edge(self.cfg.dock_edge)
 
     # ---- Drag helpers
     def start_drag(self, global_pos: QPoint):
@@ -1072,81 +1400,13 @@ class SoundboardWindow(QMainWindow):
         if self.config_path.exists():
             try:
                 data = json.loads(self.config_path.read_text(encoding="utf-8"))
+                return parse_config(data)
+            except (OSError, ValueError, TypeError) as exc:
+                print(f"Could not read config: {exc}", file=sys.stderr)
 
-                buttons = []
-                for i, b in enumerate(data.get("buttons", [])):
-                    btn = ButtonConfig(**b)
-                    # Set default hotkey if not present
-                    if not btn.hotkey and i < len(DEFAULT_HOTKEYS):
-                        btn.hotkey = DEFAULT_HOTKEYS[i]
-                    buttons.append(btn)
-                
-                while len(buttons) < MAX_BUTTONS:
-                    idx = len(buttons)
-                    btn = ButtonConfig()
-                    if idx < len(DEFAULT_HOTKEYS):
-                        btn.hotkey = DEFAULT_HOTKEYS[idx]
-                    buttons.append(btn)
-                buttons = buttons[:MAX_BUTTONS]
-
-                dock_edge = (data.get("dock_edge", "top") or "top").lower().strip()
-                if dock_edge not in ("left", "right", "top", "bottom"):
-                    dock_edge = "top"
-
-                volume = float(data.get("volume", 0.75))
-                volume = max(0.0, min(1.0, volume))
-
-                video_mode = (data.get("video_mode", "fullscreen_burst") or "fullscreen_burst").lower().strip()
-                if video_mode not in ("large", "fullscreen", "fullscreen_burst"):
-                    video_mode = "fullscreen_burst"
-
-                burst = float(data.get("burst_seconds", 1.6))
-                burst = max(0.2, min(10.0, burst))
-
-                vis = int(data.get("visible_buttons", DEFAULT_BUTTONS))
-                vis = max(1, min(MAX_BUTTONS, vis))
-
-                audio_dev = str(data.get("audio_device", "") or "")
-                
-                global_hotkeys = data.get("global_hotkeys_enabled", True)
-                stop_hotkey = data.get("stop_hotkey", "Escape")
-
-                return AppConfig(
-                    dock_edge=dock_edge,
-                    volume=volume,
-                    video_mode=video_mode,
-                    burst_seconds=burst,
-                    visible_buttons=vis,
-                    audio_device=audio_dev,
-                    global_hotkeys_enabled=global_hotkeys,
-                    stop_hotkey=stop_hotkey,
-                    buttons=buttons
-                )
-            except Exception:
-                pass
-
-        # Default config with default hotkeys
-        buttons = []
-        for i in range(MAX_BUTTONS):
-            btn = ButtonConfig()
-            if i < len(DEFAULT_HOTKEYS):
-                btn.hotkey = DEFAULT_HOTKEYS[i]
-            buttons.append(btn)
-        
-        return AppConfig(
-            dock_edge="top",
-            volume=0.75,
-            video_mode="fullscreen_burst",
-            burst_seconds=1.6,
-            visible_buttons=DEFAULT_BUTTONS,
-            audio_device="",
-            global_hotkeys_enabled=True,
-            stop_hotkey="Escape",
-            buttons=buttons
-        )
+        return parse_config({})
 
     def save_config(self):
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "dock_edge": self.cfg.dock_edge,
             "volume": self.cfg.volume,
@@ -1154,11 +1414,17 @@ class SoundboardWindow(QMainWindow):
             "burst_seconds": self.cfg.burst_seconds,
             "visible_buttons": self.visible_count(),
             "audio_device": self.cfg.audio_device,
+            "audio_device_id": self.cfg.audio_device_id,
             "global_hotkeys_enabled": self.cfg.global_hotkeys_enabled,
             "stop_hotkey": self.cfg.stop_hotkey,
             "buttons": [asdict(b) for b in self.cfg.buttons],
         }
-        self.config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            atomic_write_json(self.config_path, data)
+            self.last_config_error = ""
+        except OSError as exc:
+            self.last_config_error = str(exc)
+            print(f"Could not save config: {exc}", file=sys.stderr)
 
     def set_visible_buttons(self, n: int):
         n = max(1, min(MAX_BUTTONS, int(n)))
@@ -1169,6 +1435,7 @@ class SoundboardWindow(QMainWindow):
         self.set_window_size_for_edge(self.cfg.dock_edge)
         self.bar.update()
         self.snap_to_edge(self.cfg.dock_edge)
+        self._setup_global_hotkeys()
 
         if self.manager_dialog:
             self.manager_dialog.refresh()
@@ -1372,7 +1639,7 @@ class SoundboardWindow(QMainWindow):
         self.add_video_submenu(menu)
         self.add_volume_submenu(menu)
 
-        act_manage = QAction("Verwalten… (Ctrl+M)", self)
+        act_manage = QAction(f"Verwalten… ({ui_modifier_label()}+M)", self)
         act_manage.triggered.connect(self.open_manager)
         menu.addAction(act_manage)
 
@@ -1417,7 +1684,7 @@ class SoundboardWindow(QMainWindow):
         self.add_video_submenu(menu)
         self.add_volume_submenu(menu)
 
-        act_manage = QAction("Verwalten… (Ctrl+M)", self)
+        act_manage = QAction(f"Verwalten… ({ui_modifier_label()}+M)", self)
         act_manage.triggered.connect(self.open_manager)
         menu.addAction(act_manage)
 
@@ -1465,12 +1732,27 @@ class SoundboardWindow(QMainWindow):
 
     # ---- Playback
     def on_coin_clicked(self, index: int):
+        if not 0 <= index < min(MAX_BUTTONS, len(self.cfg.buttons)):
+            return
         cfg = self.cfg.buttons[index]
-        if not cfg.media_path or not Path(cfg.media_path).exists():
+        if not cfg.media_path:
             QMessageBox.information(self, "Keine Datei", "Für diese Münze ist keine Medien-Datei zugewiesen.")
             return
 
-        if self.current_index == index and self.player.playbackState().name == "PlayingState":
+        path = Path(cfg.media_path)
+        if not path.is_file():
+            QMessageBox.warning(
+                self,
+                "Datei nicht gefunden",
+                "Die zugewiesene Datei wurde verschoben, umbenannt oder gelöscht.\n\n"
+                f"{cfg.media_path}",
+            )
+            return
+
+        if (
+            self.current_index == index
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ):
             self.stop_playback()
             self.bar.update()
             return
@@ -1481,15 +1763,14 @@ class SoundboardWindow(QMainWindow):
         self.apply_audio_device()
         self.apply_volume_to_audio()
 
-        path = Path(cfg.media_path)
+        self._handling_media_error = False
         self.current_is_video = path.suffix.lower() in VIDEO_EXT
         self.current_index = index
 
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         if self.current_is_video:
             screen = self.current_screen()
-            g = screen.availableGeometry()
-            self.video_overlay.show_video(g, self.cfg.video_mode, self.cfg.burst_seconds)
+            self.video_overlay.show_video(screen, self.cfg.video_mode, self.cfg.burst_seconds)
         else:
             self.video_overlay.hide_video()
 
@@ -1506,17 +1787,28 @@ class SoundboardWindow(QMainWindow):
     def on_media_status(self, status):
         if status == QMediaPlayer.MediaStatus.InvalidMedia:
             err = self.player.errorString() or "Unbekannter Fehler (Codec/Datei)."
-            QMessageBox.warning(self, "Medien-Fehler", err)
-            self.stop_playback()
+            self._report_media_error("Medien-Fehler", err)
             return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.stop_playback()
 
     def on_media_error(self, error, error_string):
+        if error == QMediaPlayer.Error.NoError:
+            return
         msg = error_string or self.player.errorString()
-        if msg:
-            QMessageBox.warning(self, "Wiedergabe-Fehler", msg)
+        self._report_media_error("Wiedergabe-Fehler", msg or "Die Datei konnte nicht wiedergegeben werden.")
+
+    def _report_media_error(self, title: str, message: str):
+        if self._handling_media_error:
+            return
+        self._handling_media_error = True
         self.stop_playback()
+        QMessageBox.warning(
+            self,
+            title,
+            f"{message}\n\nTipp: MP3/WAV für Audio und MP4 (H.264/AAC) für Video sind "
+            "unter Windows und macOS am zuverlässigsten.",
+        )
 
     # ---- Docking / Snapping
     def apply_dock_edge(self, edge: str, snap_now=True):
@@ -1588,20 +1880,25 @@ class SoundboardWindow(QMainWindow):
         return "bottom"
 
     def keyPressEvent(self, event):
-        # Ctrl+M opens manager
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_M:
+        # Ctrl/Cmd+M opens manager
+        shortcut_modifiers = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        if event.modifiers() & shortcut_modifiers and event.key() == Qt.Key.Key_M:
             self.open_manager()
             return
 
         # Docking shortcuts
         if event.key() in (Qt.Key.Key_T, Qt.Key.Key_Up):
-            self.apply_dock_edge("top"); return
+            self.apply_dock_edge("top")
+            return
         if event.key() in (Qt.Key.Key_B, Qt.Key.Key_Down):
-            self.apply_dock_edge("bottom"); return
+            self.apply_dock_edge("bottom")
+            return
         if event.key() in (Qt.Key.Key_L, Qt.Key.Key_Left):
-            self.apply_dock_edge("left"); return
+            self.apply_dock_edge("left")
+            return
         if event.key() in (Qt.Key.Key_R, Qt.Key.Key_Right):
-            self.apply_dock_edge("right"); return
+            self.apply_dock_edge("right")
+            return
 
         # Number keys 1-8 for quick access (local hotkeys, always work when focused)
         if Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_8:
@@ -1623,15 +1920,148 @@ class SoundboardWindow(QMainWindow):
     def closeEvent(self, event):
         """Clean up when closing."""
         self.hotkey_manager.stop()
+        self.player.stop()
+        self.video_overlay.close()
+        if self.manager_dialog:
+            self.manager_dialog.close()
         super().closeEvent(event)
 
 
-def main():
+def write_crash_log(exc_type, exc_value, exc_traceback) -> None:
+    """Persist otherwise invisible errors from windowed packaged builds."""
+    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    try:
+        log_path = get_config_path().with_name("TeacherSoundboard-crash.log")
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n" + "=" * 72 + "\n")
+            handle.write(f"{APP_NAME} {VERSION} | {platform.platform()}\n")
+            traceback.print_exception(exc_type, exc_value, exc_traceback, file=handle)
+    except OSError:
+        pass
+
+
+def install_exception_handler():
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        write_crash_log(exc_type, exc_value, exc_traceback)
+        app = QApplication.instance()
+        if app:
+            QMessageBox.critical(
+                None,
+                "Unerwarteter Fehler",
+                "Teacher Soundboard hat einen unerwarteten Fehler erkannt. Die App kann neu gestartet "
+                "werden; Details wurden in TeacherSoundboard-crash.log im Einstellungsordner gespeichert.",
+            )
+
+    sys.excepthook = handle_exception
+
+
+def run_self_test(app: QApplication) -> int:
+    """Exercise imports and critical runtime objects in packaged CI builds."""
+    window = None
+    previous_config_dir = os.environ.get("TEACHER_SOUNDBOARD_CONFIG_DIR")
+    try:
+        config = parse_config({
+            "volume": "not-a-number",
+            "visible_buttons": 99,
+            "buttons": [{"hotkey": ""}],
+        })
+        assert config.volume == 0.75
+        assert config.visible_buttons == MAX_BUTTONS
+        assert config.buttons[0].hotkey == ""
+        assert GlobalHotkeyManager()._normalize_hotkey("Ctrl+F1") == "<ctrl>+<f1>"
+        if sys.platform in ("win32", "darwin") and not GLOBAL_HOTKEYS_AVAILABLE:
+            raise RuntimeError(f"Global hotkey backend failed to import: {GLOBAL_HOTKEYS_ERROR}")
+
+        with tempfile.TemporaryDirectory(prefix="teachersoundboard-self-test-") as temp_dir:
+            os.environ["TEACHER_SOUNDBOARD_CONFIG_DIR"] = temp_dir
+            atomic_write_json(
+                Path(temp_dir) / CONFIG_FILE,
+                {"global_hotkeys_enabled": False},
+            )
+            window = SoundboardWindow()
+            window.show()
+            app.processEvents()
+            if not window.isVisible():
+                raise RuntimeError("Main window did not become visible")
+
+            window.audio.setVolume(0.5)
+            media_player_available = window.player.isAvailable()
+            window.close()
+            window.deleteLater()
+            window = None
+            app.processEvents()
+
+        if sys.platform in ("win32", "darwin") and not media_player_available:
+            raise RuntimeError("Qt Multimedia backend is unavailable in this package")
+
+        print(json.dumps({
+            "status": "ok",
+            "platform": sys.platform,
+            "architecture": platform.machine(),
+            "python": platform.python_version(),
+            "pyqt": PYQT_VERSION_STR,
+            "qt": QT_VERSION_STR,
+            "main_window_created": True,
+            "media_player_available": media_player_available,
+            "global_hotkeys_imported": GLOBAL_HOTKEYS_AVAILABLE,
+        }))
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return 1
+    finally:
+        if window is not None:
+            window.close()
+            window.deleteLater()
+            app.processEvents()
+        if previous_config_dir is None:
+            os.environ.pop("TEACHER_SOUNDBOARD_CONFIG_DIR", None)
+        else:
+            os.environ["TEACHER_SOUNDBOARD_CONFIG_DIR"] = previous_config_dir
+
+
+def main() -> int:
     app = QApplication(sys.argv)
-    win = SoundboardWindow()
-    win.show()
-    sys.exit(app.exec())
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(VERSION.removeprefix("v"))
+    app.setOrganizationName("Florian Nowak")
+
+    if "--self-test" in sys.argv:
+        return run_self_test(app)
+
+    install_exception_handler()
+
+    lock_path = get_config_path().with_name("TeacherSoundboard.lock")
+    instance_lock = QLockFile(str(lock_path))
+    instance_lock.setStaleLockTime(5_000)
+    if not instance_lock.tryLock(250):
+        QMessageBox.information(
+            None,
+            "Teacher Soundboard läuft bereits",
+            "Es ist bereits eine Instanz geöffnet. Du findest sie am Bildschirmrand oder in der Taskleiste.",
+        )
+        return 0
+
+    try:
+        win = SoundboardWindow()
+        app.aboutToQuit.connect(win.hotkey_manager.stop)
+        app.aboutToQuit.connect(win.player.stop)
+        win.show()
+        return app.exec()
+    except Exception:
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        write_crash_log(exc_type, exc_value, exc_traceback)
+        QMessageBox.critical(
+            None,
+            "Start fehlgeschlagen",
+            "Teacher Soundboard konnte nicht gestartet werden. Details stehen in "
+            "TeacherSoundboard-crash.log im Einstellungsordner.",
+        )
+        return 1
+    finally:
+        instance_lock.unlock()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
