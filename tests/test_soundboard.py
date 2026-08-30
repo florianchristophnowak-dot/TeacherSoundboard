@@ -3,8 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PyQt6.QtCore import QPointF
+
 import soundboard
-from classroom_modules import PhaseTimer
+from classroom_modules import (
+    PhaseTimer, build_panel_layout, default_material_items, default_phase_items,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -141,6 +145,117 @@ class HotkeyTests(unittest.TestCase):
         else:
             self.assertFalse(first)
             self.assertFalse(second)
+
+
+class PanelLayoutTests(unittest.TestCase):
+    """Die Panelgeometrie wird ohne Fenster berechnet und ist daher prüfbar."""
+
+    def layout(self, **overrides):
+        options = dict(
+            unit=64,
+            show_phase=True,
+            show_materials=True,
+            show_timer=True,
+            phase_item=default_phase_items()[2],
+            material_items=default_material_items()[:3],
+            show_labels=True,
+            timer_minutes=7,
+            timer_total=20,
+        )
+        options.update(overrides)
+        return build_panel_layout(**options)
+
+    def test_each_module_contributes_its_own_regions(self):
+        layout = self.layout()
+        kinds = [region.kind for region in layout.regions]
+        self.assertEqual(kinds, ["phase", "material", "material", "material", "timer"])
+        self.assertEqual([text for _rect, text in layout.headings],
+                         ["SOZIALFORM", "MATERIAL", "ZEIT"])
+
+    def test_modules_can_be_switched_off_individually(self):
+        only_timer = self.layout(show_phase=False, show_materials=False)
+        self.assertEqual([region.kind for region in only_timer.regions], ["timer"])
+
+        without_timer = self.layout(show_timer=False)
+        self.assertNotIn("timer", [region.kind for region in without_timer.regions])
+        self.assertLess(without_timer.height, self.layout().height)
+
+        empty = self.layout(show_phase=False, show_materials=False, show_timer=False)
+        self.assertEqual(empty.regions, [])
+
+    def test_empty_selections_stay_clickable_as_placeholders(self):
+        layout = self.layout(phase_item=None, material_items=[])
+        kinds = [region.kind for region in layout.regions]
+        self.assertEqual(kinds.count("phase"), 1)
+        self.assertEqual(kinds.count("material"), 1)
+        icon_keys = [region.item.icon_key for region in layout.regions if region.item]
+        self.assertIn("phase-placeholder", icon_keys)
+        self.assertIn("material-placeholder", icon_keys)
+
+    def test_regions_do_not_overlap_and_stay_inside_the_panel(self):
+        layout = self.layout(material_items=default_material_items())
+        for region in layout.regions:
+            self.assertGreaterEqual(region.rect.left(), 0)
+            self.assertLessEqual(region.rect.right(), layout.width)
+            self.assertLessEqual(region.rect.bottom(), layout.height)
+        ordered = sorted(layout.regions, key=lambda region: region.rect.top())
+        for earlier, later in zip(ordered, ordered[1:]):
+            self.assertLessEqual(earlier.rect.bottom(), later.rect.top() + 0.01)
+
+    def test_hit_testing_finds_the_region_under_the_pointer(self):
+        layout = self.layout()
+        for region in layout.regions:
+            self.assertIs(layout.region_at(region.rect.center()), region)
+        self.assertIsNone(layout.region_at(QPointF(layout.width + 10, 10)))
+
+    def test_without_labels_the_panel_gets_narrower_and_keeps_its_regions(self):
+        with_labels = self.layout()
+        without = self.layout(show_labels=False)
+        self.assertLess(without.width, with_labels.width)
+        self.assertEqual(without.headings, [])
+        self.assertEqual([region.label for region in without.regions], [""] * 5)
+        self.assertEqual(
+            [region.kind for region in without.regions],
+            [region.kind for region in with_labels.regions],
+        )
+
+    def test_more_materials_make_the_panel_taller(self):
+        short = self.layout(material_items=default_material_items()[:1])
+        tall = self.layout(material_items=default_material_items())
+        self.assertGreater(tall.height, short.height)
+        self.assertEqual(tall.width, short.width)
+
+    def test_running_timer_is_captioned_with_its_total(self):
+        def caption(layout):
+            return next(r.label for r in layout.regions if r.kind == "timer")
+
+        self.assertEqual(caption(self.layout(timer_total=20)), "von 20 min")
+        self.assertEqual(caption(self.layout(timer_total=0)), "Zeit einstellen")
+
+
+class PanelConfigTests(unittest.TestCase):
+    def test_panel_settings_have_defaults_and_are_clamped(self):
+        default = soundboard.parse_config({})
+        self.assertAlmostEqual(default.panel_y_ratio, 0.08)
+        self.assertTrue(default.panel_show_labels)
+
+        clamped = soundboard.parse_config({"panel_y_ratio": 4.2, "panel_show_labels": "nope"})
+        self.assertEqual(clamped.panel_y_ratio, 1.0)
+        self.assertTrue(clamped.panel_show_labels)
+
+        restored = soundboard.parse_config({"panel_y_ratio": 0.5, "panel_show_labels": False})
+        self.assertAlmostEqual(restored.panel_y_ratio, 0.5)
+        self.assertFalse(restored.panel_show_labels)
+
+
+class BarLayoutTests(unittest.TestCase):
+    def test_modules_no_longer_share_the_sound_bar(self):
+        source = Path(soundboard.__file__).read_text(encoding="utf-8")
+        # Die Randleiste trägt nur noch Klänge und den Griff; alles Weitere
+        # steht im Panel und darf die Münzgröße nicht mehr schrumpfen lassen.
+        self.assertNotIn('slots.append(("phase"', source)
+        self.assertNotIn('slots.extend([("timer-total"', source)
+
 
 
 if __name__ == "__main__":

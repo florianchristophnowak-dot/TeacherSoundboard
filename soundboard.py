@@ -33,14 +33,14 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 from classroom_modules import (
-    CatalogEditorDialog, IconPickerPopup, PhaseTimer, TimerControlPopup,
-    VisualItem, default_material_items, default_phase_items, paint_action_icon,
-    paint_timer_dial, paint_visual_item, parse_visual_items,
+    CatalogEditorDialog, ClassroomPanel, IconPickerPopup, PhaseTimer,
+    TimerControlPopup, VisualItem, asset_icon_dir, default_material_items,
+    default_phase_items, paint_action_icon, parse_visual_items,
 )
 
 
 APP_NAME = "Teacher Soundboard"
-VERSION = "v4.4.0"
+VERSION = "v4.5.0"
 CONFIG_FILE = "soundboard_config.json"
 
 DEFAULT_BUTTONS = 6
@@ -177,6 +177,8 @@ class AppConfig:
     selected_material_ids: list[str] = field(default_factory=list)
     timer_presets: list[int] = field(default_factory=lambda: [5, 8, 10])
     timer_default_minutes: int = 5
+    panel_y_ratio: float = 0.08   # senkrechte Lage des Panels am rechten Rand
+    panel_show_labels: bool = True
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -291,6 +293,8 @@ def parse_config(data) -> AppConfig:
         selected_material_ids=selected_material_ids,
         timer_presets=presets,
         timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
+        panel_y_ratio=_bounded_float(data.get("panel_y_ratio"), 0.08, 0.0, 1.0),
+        panel_show_labels=config_bool("panel_show_labels", True),
     )
 
 
@@ -935,13 +939,13 @@ class ManageDialog(QDialog):
         root.addWidget(hotkey_info)
 
         # ---- Integrated classroom modules ----
-        classroom_group = QGroupBox("Optionale Unterrichtsleiste")
+        classroom_group = QGroupBox("Optionale Unterrichtsmodule (Panel am rechten Rand)")
         classroom_layout = QHBoxLayout(classroom_group)
         self.module_checks: dict[str, QCheckBox] = {}
         for key, label in [
-            ("soundboard", "Soundboard"),
+            ("soundboard", "Soundboard-Leiste"),
             ("phase", "Methode/Sozialform"),
-            ("materials", "Materialien"),
+            ("materials", "Material"),
             ("timer", "Timer"),
         ]:
             checkbox = QCheckBox(label)
@@ -950,6 +954,13 @@ class ManageDialog(QDialog):
             )
             classroom_layout.addWidget(checkbox)
             self.module_checks[key] = checkbox
+
+        self.panel_labels_check = QCheckBox("Beschriftung")
+        self.panel_labels_check.setToolTip(
+            "Blendet Überschriften und Namen im Panel ein oder aus."
+        )
+        self.panel_labels_check.stateChanged.connect(self._on_panel_labels_changed)
+        classroom_layout.addWidget(self.panel_labels_check)
 
         classroom_layout.addSpacing(12)
         phase_catalog = QPushButton("Methoden/Sozialformen bearbeiten…")
@@ -1108,6 +1119,10 @@ class ManageDialog(QDialog):
             checkbox.setChecked(module_values[key])
             checkbox.blockSignals(False)
 
+        self.panel_labels_check.blockSignals(True)
+        self.panel_labels_check.setChecked(self.host.cfg.panel_show_labels)
+        self.panel_labels_check.blockSignals(False)
+
         # Global hotkeys
         self.global_hotkeys_check.blockSignals(True)
         self.global_hotkeys_check.setChecked(self.host.cfg.global_hotkeys_enabled)
@@ -1156,6 +1171,9 @@ class ManageDialog(QDialog):
 
     def _on_module_changed(self, module: str, state):
         self.host.set_module_visible(module, state == Qt.CheckState.Checked.value)
+
+    def _on_panel_labels_changed(self, state):
+        self.host.set_panel_labels(state == Qt.CheckState.Checked.value)
 
     def _on_global_hotkeys_changed(self, state):
         self.host.set_global_hotkeys_enabled(state == Qt.CheckState.Checked.value)
@@ -1301,6 +1319,8 @@ class SoundboardWindow(QMainWindow):
         self.bar = CoinBar(self)
         self.setCentralWidget(self.bar)
 
+        self.panel = ClassroomPanel(self)
+
         self.manager_dialog: ManageDialog | None = None
 
         # Global hotkey manager
@@ -1321,6 +1341,7 @@ class SoundboardWindow(QMainWindow):
             for screen in app.screens():
                 screen.availableGeometryChanged.connect(self._schedule_reposition)
         QTimer.singleShot(0, self._attach_window_screen_signal)
+        self.panel.relayout()
 
     def _setup_global_hotkeys(self):
         """Setup global hotkeys from config."""
@@ -1497,6 +1518,7 @@ class SoundboardWindow(QMainWindow):
         self.compute_sizes_for_edge(self.cfg.dock_edge)
         self.set_window_size_for_edge(self.cfg.dock_edge)
         self.snap_to_edge(self.cfg.dock_edge)
+        self.panel.relayout()
 
     # ---- Drag helpers
     def start_drag(self, global_pos: QPoint):
@@ -1549,6 +1571,8 @@ class SoundboardWindow(QMainWindow):
             "selected_material_ids": list(self.cfg.selected_material_ids),
             "timer_presets": list(self.cfg.timer_presets),
             "timer_default_minutes": self.cfg.timer_default_minutes,
+            "panel_y_ratio": self.cfg.panel_y_ratio,
+            "panel_show_labels": self.cfg.panel_show_labels,
         }
         try:
             atomic_write_json(self.config_path, data)
@@ -1608,19 +1632,10 @@ class SoundboardWindow(QMainWindow):
         return [by_id[item_id] for item_id in self.cfg.selected_material_ids if item_id in by_id]
 
     def display_slots(self) -> list[tuple[str, object]]:
+        """Belegung der Randleiste. Sozialform, Material und Timer stehen im Panel."""
         slots: list[tuple[str, object]] = []
         if self.cfg.show_soundboard:
             slots.extend(("sound", index) for index in range(self.visible_count()))
-        if self.cfg.show_phase:
-            slots.append(("phase", self.selected_phase_item()))
-        if self.cfg.show_materials:
-            materials = self.selected_material_items()
-            if materials:
-                slots.extend(("material", item) for item in materials)
-            else:
-                slots.append(("material", None))
-        if self.cfg.show_timer:
-            slots.extend([("timer-total", None), ("timer-remaining", None)])
         # A language-independent handle remains available even if every module is hidden.
         slots.append(("handle", None))
         return slots
@@ -1753,65 +1768,24 @@ class SoundboardWindow(QMainWindow):
         p.end()
         return pm
 
-    # ---- Integrated classroom modules
+    # ---- Randleiste
     def paint_classroom_modules(self, painter: QPainter) -> None:
-        slots = self.display_slots()
-        phase_placeholder = VisualItem("phase-placeholder", "", "phase-placeholder")
-        material_placeholder = VisualItem("material-placeholder", "", "material-placeholder")
-        timer_progress = self.phase_timer.progress()
-
-        for slot_index, (kind, payload) in enumerate(slots):
-            if kind == "sound":
+        """Zeichnet den Griff der Randleiste; die Module leben im Panel."""
+        for slot_index, (kind, _payload) in enumerate(self.display_slots()):
+            if kind != "handle":
                 continue
             rect = self.slot_rect(slot_index)
-            if kind == "phase":
-                paint_visual_item(painter, rect, payload or phase_placeholder, payload is not None)
-            elif kind == "material":
-                paint_visual_item(painter, rect, payload or material_placeholder, payload is not None)
-            elif kind == "timer-total":
-                paint_timer_dial(
-                    painter, rect, self.phase_timer.total_minutes(),
-                    timer_progress, remaining=False,
-                )
-            elif kind == "timer-remaining":
-                paint_timer_dial(
-                    painter, rect, self.phase_timer.remaining_minutes(),
-                    timer_progress, remaining=True,
-                )
-            elif kind == "handle":
-                inset = rect.width() * 0.15
-                inner = rect.adjusted(inset, inset, -inset, -inset)
-                painter.setPen(QPen(QColor(255, 255, 255, 70), max(1.0, rect.width()*0.025)))
-                painter.setBrush(QBrush(QColor(28, 33, 39, 218)))
-                painter.drawRoundedRect(inner, inner.width()*0.25, inner.height()*0.25)
-                paint_action_icon(painter, inner.adjusted(5, 5, -5, -5), "menu")
+            inset = rect.width() * 0.15
+            inner = rect.adjusted(inset, inset, -inset, -inset)
+            painter.setPen(QPen(QColor(255, 255, 255, 70), max(1.0, rect.width()*0.025)))
+            painter.setBrush(QBrush(QColor(28, 33, 39, 218)))
+            painter.drawRoundedRect(inner, inner.width()*0.25, inner.height()*0.25)
+            paint_action_icon(painter, inner.adjusted(5, 5, -5, -5), "menu")
 
-        if self.cfg.show_timer and self.phase_timer.has_value():
-            self._paint_edge_progress(painter, timer_progress)
-
-    def _paint_edge_progress(self, painter: QPainter, progress: float) -> None:
-        thickness = max(5.0, min(9.0, self.slot_size * 0.10))
-        track_color = QColor(255, 255, 255, 65)
-        active_color = (
-            QColor("#63c6a0") if progress > 0.20
-            else QColor("#eda34d") if progress > 0
-            else QColor("#df5d67")
-        )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(track_color))
-        edge = self.cfg.dock_edge
-        if edge in ("top", "bottom"):
-            y = 0.0 if edge == "top" else self.height() - thickness
-            track = QRectF(0, y, self.width(), thickness)
-            fill = QRectF(track.x(), track.y(), track.width()*progress, track.height())
-        else:
-            x = 0.0 if edge == "left" else self.width() - thickness
-            track = QRectF(x, 0, thickness, self.height())
-            fill_height = track.height()*progress
-            fill = QRectF(track.x(), track.bottom() - fill_height, track.width(), fill_height)
-        painter.drawRect(track)
-        painter.setBrush(QBrush(active_color))
-        painter.drawRect(fill)
+    def _refresh_views(self) -> None:
+        """Zeichnet Randleiste und Panel neu, ohne die Anordnung zu ändern."""
+        self.bar.update()
+        self.panel.relayout()
 
     def _refresh_module_layout(self, persist: bool = True) -> None:
         if persist:
@@ -1821,6 +1795,7 @@ class SoundboardWindow(QMainWindow):
         self.bar.update()
         if self.isVisible():
             self.snap_to_edge(self.cfg.dock_edge)
+        self.panel.relayout()
         if self.manager_dialog:
             self.manager_dialog.refresh()
 
@@ -1836,16 +1811,14 @@ class SoundboardWindow(QMainWindow):
         setattr(self.cfg, field_name, bool(visible))
         self._refresh_module_layout()
 
+    def set_panel_labels(self, visible: bool) -> None:
+        self.cfg.panel_show_labels = bool(visible)
+        self._refresh_module_layout()
+
     def activate_target(self, target: tuple[str, object], global_pos: QPoint) -> None:
         kind, payload = target
         if kind == "sound":
             self.on_coin_clicked(int(payload))
-        elif kind == "phase":
-            self.open_phase_picker(global_pos)
-        elif kind == "material":
-            self.open_material_picker(global_pos)
-        elif kind in ("timer-total", "timer-remaining"):
-            self.open_timer_controls(global_pos)
         elif kind == "handle":
             self.open_window_menu(global_pos)
 
@@ -1887,7 +1860,7 @@ class SoundboardWindow(QMainWindow):
         valid_ids = {item.item_id for item in self.cfg.phase_items}
         self.cfg.selected_phase_id = item_id if item_id in valid_ids else ""
         self.save_config()
-        self.bar.update()
+        self._refresh_views()
 
     def toggle_selected_material(self, item_id: str) -> None:
         valid_ids = {item.item_id for item in self.cfg.material_items}
@@ -1925,7 +1898,7 @@ class SoundboardWindow(QMainWindow):
         self.save_config()
         self.phase_timer.start(minutes)
         self._module_tick.start()
-        self.bar.update()
+        self._refresh_views()
 
     def toggle_phase_timer(self) -> None:
         if not self.phase_timer.has_value():
@@ -1934,7 +1907,7 @@ class SoundboardWindow(QMainWindow):
         self.phase_timer.toggle_pause()
         if self.phase_timer.running:
             self._module_tick.start()
-        self.bar.update()
+        self._refresh_views()
 
     def reset_phase_timer(self) -> None:
         if not self.phase_timer.has_value():
@@ -1942,24 +1915,25 @@ class SoundboardWindow(QMainWindow):
             return
         self.phase_timer.reset()
         self._module_tick.start()
-        self.bar.update()
+        self._refresh_views()
 
     def add_phase_minutes(self, minutes: int) -> None:
         self.phase_timer.add_minutes(minutes)
         if self.phase_timer.running:
             self._module_tick.start()
-        self.bar.update()
+        self._refresh_views()
 
     def clear_phase_timer(self) -> None:
         self.phase_timer.clear()
         self._module_tick.stop()
-        self.bar.update()
+        self._refresh_views()
 
     def _on_module_tick(self) -> None:
         self.phase_timer.remaining_seconds()
-        self.bar.update()
+        self.panel.update()
         if not self.phase_timer.running:
             self._module_tick.stop()
+            self.panel.relayout()
 
     def open_catalog_editor(self, catalog: str) -> None:
         if catalog == "phase":
@@ -2042,11 +2016,11 @@ class SoundboardWindow(QMainWindow):
             vol_menu.addAction(act)
 
     def add_modules_submenu(self, menu: QMenu):
-        module_menu = menu.addMenu("Unterrichtsleiste")
+        module_menu = menu.addMenu("Anzeige")
         modules = [
-            ("soundboard", "Soundboard", self.cfg.show_soundboard),
+            ("soundboard", "Soundboard-Leiste", self.cfg.show_soundboard),
             ("phase", "Methode/Sozialform", self.cfg.show_phase),
-            ("materials", "Materialien", self.cfg.show_materials),
+            ("materials", "Material", self.cfg.show_materials),
             ("timer", "Timer", self.cfg.show_timer),
         ]
         for key, label, visible in modules:
@@ -2057,6 +2031,13 @@ class SoundboardWindow(QMainWindow):
                 lambda checked=False, module=key: self.set_module_visible(module, checked)
             )
             module_menu.addAction(action)
+
+        module_menu.addSeparator()
+        labels = QAction("Beschriftung im Panel", self)
+        labels.setCheckable(True)
+        labels.setChecked(self.cfg.panel_show_labels)
+        labels.triggered.connect(self.set_panel_labels)
+        module_menu.addAction(labels)
 
     def open_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
@@ -2351,6 +2332,7 @@ class SoundboardWindow(QMainWindow):
         self.hotkey_manager.stop()
         self.player.stop()
         self.video_overlay.close()
+        self.panel.close()
         if self._picker_popup:
             self._picker_popup.close()
         if self._timer_popup:
@@ -2425,12 +2407,25 @@ def run_self_test(app: QApplication) -> int:
             app.processEvents()
             if not window.isVisible():
                 raise RuntimeError("Main window did not become visible")
-            slot_kinds = [kind for kind, _payload in window.display_slots()]
-            if not {"sound", "phase", "material", "timer-total", "timer-remaining", "handle"}.issubset(slot_kinds):
-                raise RuntimeError(f"Classroom modules missing from layout: {slot_kinds}")
+            slot_kinds = {kind for kind, _payload in window.display_slots()}
+            if slot_kinds != {"sound", "handle"}:
+                raise RuntimeError(f"Unexpected bar layout: {sorted(slot_kinds)}")
             preview = window.bar.grab()
             if preview.isNull():
-                raise RuntimeError("Classroom bar did not render")
+                raise RuntimeError("Sound bar did not render")
+
+            app.processEvents()
+            panel_layout = window.panel.layout_data
+            if panel_layout is None:
+                raise RuntimeError("Classroom panel was not laid out")
+            panel_kinds = {region.kind for region in panel_layout.regions}
+            if panel_kinds != {"phase", "material", "timer"}:
+                raise RuntimeError(f"Classroom modules missing from panel: {sorted(panel_kinds)}")
+            if not window.panel.isVisible():
+                raise RuntimeError("Classroom panel did not become visible")
+            panel_preview = window.panel.grab()
+            if panel_preview.isNull():
+                raise RuntimeError("Classroom panel did not render")
 
             window.audio.setVolume(0.5)
             media_player_available = window.player.isAvailable()
@@ -2453,6 +2448,7 @@ def run_self_test(app: QApplication) -> int:
             "media_player_available": media_player_available,
             "global_hotkeys_imported": GLOBAL_HOTKEYS_AVAILABLE,
             "classroom_modules_rendered": True,
+            "bundled_icons": len(list(asset_icon_dir().glob("*.png"))),
         }))
         return 0
     except Exception:

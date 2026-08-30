@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/florianchristophnowak-dot/TeacherSoundboard?include_prereleases)](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Eine lokale, modulare Unterrichtsleiste mit Soundboard, sprachfreier Phasenanzeige, Materialien und Timer.
+Eine lokale Unterrichtshilfe: Soundboard-Leiste am Bildschirmrand und ein Panel für Sozialform, Material und Timer.
 
 ## Download
 
@@ -51,19 +51,30 @@ Ohne diese Freigabe startet die App weiterhin stabil und ist per Mausklick sowie
 - `Strg+M` (Windows) bzw. `Cmd+M` (macOS): Verwaltung öffnen
 - Globale Standard-Hotkeys: `F1`–`F8`; im Manager frei änderbar
 
-## Modulare Unterrichtsleiste ab v4.4.0
+## Unterrichtspanel ab v4.5.0
 
-Soundboard, Methode/Sozialform, Materialien und Timer können unabhängig voneinander ein- oder ausgeblendet werden. Ein kleiner Symbolgriff bleibt immer sichtbar, damit ausgeblendete Module erreichbar bleiben.
+Methode/Sozialform, Material und Timer stehen in einem eigenen Panel am rechten Bildschirmrand, getrennt von der Soundboard-Leiste. Dort ist Platz für große, aus der letzten Reihe lesbare Symbole. Das Panel lässt sich am rechten Rand frei nach oben und unten schieben; die Lage wird gespeichert.
 
-- Methode oder Sozialform: Symbol anklicken und ein Symbol aus der sprachfreien Auswahl wählen
-- Materialien: Symbol anklicken und beliebig viele Materialien aktivieren
-- Timer: eine der Zahlen `5`, `8` oder `10` wählen oder eine eigene Minutenzahl einstellen
-- Timeranzeige: Gesamtminuten und verbleibende Minuten als zwei Ziffernfelder, ohne Sekunden oder Wörter
-- Fortschritt: kontinuierlich schrumpfender Balken am jeweils angedockten Bildschirmrand
+Alle vier Bestandteile sind einzeln zu- und abschaltbar, über das Kontextmenü unter *Anzeige* oder in der Verwaltung:
+
+- Soundboard-Leiste: die Klangschaltflächen am gewählten Bildschirmrand
+- Methode oder Sozialform: Kachel anklicken und ein Symbol auswählen
+- Material: Kachel anklicken und beliebig viele Materialien aktivieren
+- Timer: `5`, `8` oder `10` Minuten wählen oder eine eigene Minutenzahl einstellen; der Ring färbt sich von Grün über Orange nach Rot
+
+Die Beschriftungen im Panel lassen sich abschalten, dann bleiben nur die Symbole. Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
 
 Die mitgelieferten Methoden-/Sozialform- und Materialkataloge lassen sich in der Verwaltung bearbeiten. Eigene Einträge können ergänzt, umbenannt, sortiert oder gelöscht werden. Für jeden Eintrag kann ein eigenes PNG-, JPG- oder SVG-Symbol gewählt werden. Importierte Bilder werden in den lokalen Einstellungsordner kopiert und bleiben daher auch erhalten, wenn die ursprüngliche Datei später verschoben wird.
 
-In der dauerhaft eingeblendeten Unterrichtsleiste und den Auswahltabellen werden ausschließlich Symbole, Bilder und Ziffern verwendet. Bezeichnungen erscheinen nur in der Verwaltung und als Hilfetext.
+### Symbole
+
+Die mitgelieferten Symbole liegen in `assets/icons/` als PNG mit transparentem Hintergrund; der Dateiname entspricht dem `icon_key` des Eintrags. Die farbige Kachel darunter zeichnet das Programm selbst, damit Auswahlzustand und Umgebung steuerbar bleiben. Fehlt eine Datei, wird ersatzweise ein einfaches Vektorsymbol gezeichnet.
+
+Ein ganzes Symbolblatt lässt sich in einem Zug in Einzeldateien zerlegen:
+
+```bash
+python tools/slice_icon_sheet.py blatt.png --preview build/preview
+```
 
 ## Zuverlässige Medienformate
 

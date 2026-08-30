@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import math
 import shutil
+import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QBrush, QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap,
+    QBrush, QColor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen,
+    QPixmap,
 )
 from PyQt6.QtWidgets import (
     QDialog, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
-    QToolButton, QVBoxLayout,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 
@@ -179,25 +181,75 @@ class PhaseTimer:
         return self.total_seconds > 0
 
 
-_PALETTES = {
-    "plenum": (QColor("#f2c45e"), QColor("#5d4315")),
-    "individual": (QColor("#9fc9e8"), QColor("#183f5b")),
-    "partner": (QColor("#efad81"), QColor("#653217")),
-    "group": (QColor("#9fd3b6"), QColor("#174b33")),
-    "presentation": (QColor("#c5b3e6"), QColor("#412c68")),
-    "stations": (QColor("#e7a9c0"), QColor("#63243d")),
-    "binder": (QColor("#f1c86d"), QColor("#5c431a")),
-    "book": (QColor("#9fc9e8"), QColor("#183f5b")),
-    "workbook": (QColor("#b7b0e7"), QColor("#363064")),
-    "worksheet": (QColor("#efefef"), QColor("#3f4650")),
-    "pen": (QColor("#efad81"), QColor("#653217")),
-    "tablet": (QColor("#9fd3b6"), QColor("#174b33")),
-    "headphones": (QColor("#e7a9c0"), QColor("#63243d")),
-    "phase-placeholder": (QColor("#f2c45e"), QColor("#5d4315")),
-    "material-placeholder": (QColor("#9fc9e8"), QColor("#183f5b")),
-    "generic": (QColor("#d7d9dc"), QColor("#31353a")),
-    "clear": (QColor("#e2e2e2"), QColor("#8c2731")),
+# Kachelfarben der mitgelieferten Symbole. Gleiche wahrgenommene Helligkeit,
+# damit die Reihe als ein System wirkt; kühle Töne für Sozialformen, warme für
+# Material. Das Motiv ist immer weiß.
+_TILE_COLORS = {
+    "plenum": QColor("#2563eb"),
+    "individual": QColor("#7c3aed"),
+    "partner": QColor("#0d9488"),
+    "group": QColor("#16a34a"),
+    "presentation": QColor("#c026d3"),
+    "stations": QColor("#0891b2"),
+    "binder": QColor("#ea580c"),
+    "book": QColor("#dc2626"),
+    "workbook": QColor("#d97706"),
+    "worksheet": QColor("#64748b"),
+    "pen": QColor("#e11d48"),
+    "tablet": QColor("#334155"),
+    "headphones": QColor("#b45309"),
+    "phase-placeholder": QColor("#3f4854"),
+    "material-placeholder": QColor("#3f4854"),
+    "generic": QColor("#475569"),
+    "clear": QColor("#7f1d1d"),
 }
+_INK = QColor("#ffffff")
+
+_GLYPH_CACHE: dict[str, QPixmap | None] = {}
+
+
+def asset_icon_dir() -> Path:
+    """Ordner der mitgelieferten Symbole, auch im gepackten Programm."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    root = Path(bundle) if bundle else Path(__file__).resolve().parent
+    return root / "assets" / "icons"
+
+
+def glyph_pixmap(icon_key: str) -> QPixmap | None:
+    """Mitgeliefertes Symbol (weißes Motiv auf transparentem Grund) oder None."""
+    if icon_key in _GLYPH_CACHE:
+        return _GLYPH_CACHE[icon_key]
+    pixmap = None
+    path = asset_icon_dir() / f"{icon_key}.png"
+    if path.is_file():
+        loaded = QPixmap(str(path))
+        if not loaded.isNull():
+            pixmap = loaded
+    _GLYPH_CACHE[icon_key] = pixmap
+    return pixmap
+
+
+def clear_glyph_cache() -> None:
+    _GLYPH_CACHE.clear()
+
+
+def tile_color(icon_key: str) -> QColor:
+    return _TILE_COLORS.get(icon_key, _TILE_COLORS["generic"])
+
+
+def _fit_square(rect: QRectF, pixmap: QPixmap) -> QRectF:
+    """Zielrechteck, das das Bild seitenverhältnistreu in rect zentriert."""
+    if pixmap.width() <= 0 or pixmap.height() <= 0:
+        return rect
+    ratio = min(rect.width() / pixmap.width(), rect.height() / pixmap.height())
+    width = pixmap.width() * ratio
+    height = pixmap.height() * ratio
+    return QRectF(
+        rect.center().x() - width / 2.0,
+        rect.center().y() - height / 2.0,
+        width,
+        height,
+    )
 
 
 def _person(p: QPainter, x: float, y: float, scale: float, color: QColor) -> None:
@@ -330,25 +382,28 @@ def _draw_builtin(p: QPainter, rect: QRectF, key: str, color: QColor) -> None:
 
 
 def paint_visual_item(p: QPainter, rect: QRectF, item: VisualItem, selected: bool = False) -> None:
-    fill, ink = _PALETTES.get(item.icon_key, _PALETTES["generic"])
-    inner = _rounded_background(p, rect, fill, selected)
+    """Zeichnet eine Symbolkachel: eigenes Bild, mitgeliefertes Symbol oder Vektor-Rückfall."""
+    inner = _rounded_background(p, rect, tile_color(item.icon_key), selected)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
     image_path = Path(item.image_path) if item.image_path else None
     if image_path and image_path.is_file():
         pixmap = QPixmap(str(image_path))
         if not pixmap.isNull():
-            target = inner.adjusted(inner.width()*0.10, inner.height()*0.10, -inner.width()*0.10, -inner.height()*0.10)
-            scaled = pixmap.scaled(
-                int(target.width()), int(target.height()),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+            target = inner.adjusted(
+                inner.width()*0.10, inner.height()*0.10,
+                -inner.width()*0.10, -inner.height()*0.10,
             )
-            x = target.center().x() - scaled.width()/2
-            y = target.center().y() - scaled.height()/2
-            p.drawPixmap(int(x), int(y), scaled)
+            p.drawPixmap(_fit_square(target, pixmap), pixmap, QRectF(pixmap.rect()))
             return
 
-    _draw_builtin(p, inner.adjusted(inner.width()*0.13, inner.height()*0.13, -inner.width()*0.13, -inner.height()*0.13), item.icon_key, ink)
+    # Die mitgelieferten Dateien tragen ihren Rand bereits in sich.
+    glyph = glyph_pixmap(item.icon_key)
+    if glyph is not None:
+        p.drawPixmap(_fit_square(inner, glyph), glyph, QRectF(glyph.rect()))
+        return
+
+    _draw_builtin(p, inner.adjusted(inner.width()*0.13, inner.height()*0.13, -inner.width()*0.13, -inner.height()*0.13), item.icon_key, _INK)
 
 
 def render_visual_item(item: VisualItem, size: int = 64, selected: bool = False) -> QPixmap:
@@ -427,12 +482,361 @@ def paint_timer_dial(
     arc = max(0, min(360*16, int(360*16*(progress if remaining else 1.0))))
     p.drawArc(ring, 90*16, -arc)
 
-    font = QFont("Segoe UI")
+    font = QFont()
     font.setBold(True)
     font.setPixelSize(max(12, int(rect.width()*0.30)))
     p.setFont(font)
     p.setPen(QColor("#ffffff"))
     p.drawText(inner, Qt.AlignmentFlag.AlignCenter, str(max(0, int(value))))
+
+
+# ---------------- Unterrichtspanel am rechten Bildschirmrand ----------------
+PANEL_MIN_UNIT = 36
+PANEL_MAX_UNIT = 96
+PANEL_HEADING_PHASE = "SOZIALFORM"
+PANEL_HEADING_MATERIAL = "MATERIAL"
+PANEL_HEADING_TIMER = "ZEIT"
+
+
+@dataclass
+class PanelRegion:
+    """Ein anklickbarer Abschnitt des Panels."""
+
+    kind: str                                    # "phase" | "material" | "timer"
+    rect: QRectF                                 # Klickfläche
+    tile: QRectF                                 # Zeichenfläche für Symbol oder Zifferblatt
+    item: VisualItem | None = None
+    label: str = ""
+    label_rect: QRectF = field(default_factory=QRectF)
+
+
+@dataclass
+class PanelLayout:
+    width: int
+    height: int
+    unit: int
+    grip: QRectF
+    regions: list[PanelRegion] = field(default_factory=list)
+    headings: list[tuple[QRectF, str]] = field(default_factory=list)
+
+    def region_at(self, point: QPointF) -> PanelRegion | None:
+        for region in self.regions:
+            if region.rect.contains(point):
+                return region
+        return None
+
+
+def build_panel_layout(
+    unit: int,
+    show_phase: bool,
+    show_materials: bool,
+    show_timer: bool,
+    phase_item: VisualItem | None,
+    material_items: list[VisualItem],
+    show_labels: bool = True,
+    timer_minutes: int = 0,
+    timer_total: int = 0,
+) -> PanelLayout:
+    """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar."""
+    unit = max(PANEL_MIN_UNIT, int(unit))
+    pad = round(unit * 0.30)
+    gap = round(unit * 0.30)
+    row_gap = round(unit * 0.16)
+    big = round(unit * 1.50)
+    small = unit
+    text_width = round(unit * 2.20)
+    heading_height = round(unit * 0.42) if show_labels else 0
+    name_height = round(unit * 0.48) if show_labels else 0
+    dial = round(unit * 1.60)
+    grip_height = round(unit * 0.26)
+
+    content_width = (small + row_gap + text_width) if show_labels else big
+    width = pad * 2 + content_width
+    left = float(pad)
+
+    layout = PanelLayout(width=width, height=0, unit=unit, grip=QRectF())
+    grip_width = round(unit * 0.62)
+    layout.grip = QRectF(
+        (width - grip_width) / 2.0, pad * 0.55, grip_width, max(3.0, grip_height * 0.28)
+    )
+
+    y = float(pad + grip_height)
+
+    def add_heading(text: str) -> None:
+        nonlocal y
+        if not show_labels:
+            return
+        layout.headings.append((QRectF(left, y, content_width, heading_height), text))
+        y += heading_height
+
+    if show_phase:
+        add_heading(PANEL_HEADING_PHASE)
+        item = phase_item or VisualItem("phase-placeholder", "Sozialform wählen", "phase-placeholder")
+        tile = QRectF(left + (content_width - big) / 2.0, y, big, big)
+        label_rect = QRectF(left, y + big, content_width, name_height)
+        layout.regions.append(PanelRegion(
+            "phase", QRectF(left, y, content_width, big + name_height), tile,
+            item, item.name if show_labels else "", label_rect,
+        ))
+        y += big + name_height + gap
+
+    if show_materials:
+        add_heading(PANEL_HEADING_MATERIAL)
+        items = material_items or [
+            VisualItem("material-placeholder", "Material wählen", "material-placeholder")
+        ]
+        for index, item in enumerate(items):
+            if index:
+                y += row_gap
+            tile = QRectF(left, y, small, small)
+            label_rect = QRectF(left + small + row_gap, y, text_width, small)
+            layout.regions.append(PanelRegion(
+                "material", QRectF(left, y, content_width, small), tile,
+                item, item.name if show_labels else "", label_rect,
+            ))
+            y += small
+        y += gap
+
+    if show_timer:
+        add_heading(PANEL_HEADING_TIMER)
+        tile = QRectF(left + (content_width - dial) / 2.0, y, dial, dial)
+        if timer_total > 0:
+            caption = f"von {timer_total} min"
+        else:
+            caption = "Zeit einstellen"
+        label_rect = QRectF(left, y + dial, content_width, name_height)
+        layout.regions.append(PanelRegion(
+            "timer", QRectF(left, y, content_width, dial + name_height), tile,
+            None, caption if show_labels else "", label_rect,
+        ))
+        y += dial + name_height + gap
+
+    if layout.regions:
+        y -= gap
+    layout.height = int(round(y + pad))
+    return layout
+
+
+class ClassroomPanel(QWidget):
+    """Frei am rechten Bildschirmrand verschiebbares Anzeigefeld.
+
+    Zeigt Sozialform, Material und Timer groß genug, um bis in die letzte Reihe
+    lesbar zu sein. Jeder der drei Abschnitte lässt sich einzeln zuschalten.
+    """
+
+    def __init__(self, host):
+        # Kein Qt.Tool: macOS blendet Werkzeugfenster aus, sobald eine andere
+        # Anwendung aktiv wird - das Panel soll aber gerade dann sichtbar sein.
+        # Das Elternfenster verhindert einen zweiten Eintrag in der Taskleiste.
+        super().__init__(
+            host,
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setMouseTracking(True)
+        self.host = host
+        self.layout_data: PanelLayout | None = None
+        self._drag_grab = 0
+        self._dragging = False
+        self._hovered: str = ""
+
+    # ---- Geometrie
+    def has_content(self) -> bool:
+        cfg = self.host.cfg
+        return bool(cfg.show_phase or cfg.show_materials or cfg.show_timer)
+
+    def unit_for_screen(self) -> int:
+        available = self.host.current_screen().availableGeometry()
+        return max(44, min(PANEL_MAX_UNIT, int(available.height() * 0.062)))
+
+    def relayout(self, reposition: bool = True) -> None:
+        if not self.has_content():
+            self.layout_data = None
+            self.hide()
+            return
+
+        cfg = self.host.cfg
+        timer = self.host.phase_timer
+        available = self.host.current_screen().availableGeometry()
+        unit = self.unit_for_screen()
+
+        # Bei vielen Materialien darf das Panel nicht über den Bildschirm
+        # hinauswachsen: notfalls kleiner rechnen, bis es passt.
+        while True:
+            layout = build_panel_layout(
+                unit,
+                cfg.show_phase,
+                cfg.show_materials,
+                cfg.show_timer,
+                self.host.selected_phase_item(),
+                self.host.selected_material_items(),
+                show_labels=cfg.panel_show_labels,
+                timer_minutes=timer.remaining_minutes(),
+                timer_total=timer.total_minutes(),
+            )
+            if layout.height <= available.height() or unit <= PANEL_MIN_UNIT:
+                break
+            unit = max(PANEL_MIN_UNIT, int(unit * 0.9))
+
+        self.layout_data = layout
+        self.setFixedSize(self.layout_data.width, self.layout_data.height)
+        if reposition:
+            self.apply_position()
+        if not self.isVisible():
+            self.show()
+        self.update()
+
+    def apply_position(self) -> None:
+        available = self.host.current_screen().availableGeometry()
+        ratio = max(0.0, min(1.0, float(self.host.cfg.panel_y_ratio)))
+        span = max(0, available.height() - self.height())
+        self.move(
+            available.right() - self.width() + 1,
+            available.top() + int(round(ratio * span)),
+        )
+
+    def _store_position(self) -> None:
+        available = self.host.current_screen().availableGeometry()
+        span = max(1, available.height() - self.height())
+        ratio = (self.y() - available.top()) / float(span)
+        self.host.cfg.panel_y_ratio = max(0.0, min(1.0, ratio))
+        self.host.save_config()
+
+    # ---- Zeichnen
+    def paintEvent(self, event):
+        if self.layout_data is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        radius = self.layout_data.unit * 0.30
+        # Über den rechten Rand hinaus zeichnen, damit dort keine Rundung
+        # entsteht: das Panel sitzt bündig an der Bildschirmkante.
+        card = QRectF(0.5, 0.5, self.width() - 1 + radius, self.height() - 1)
+        painter.setBrush(QBrush(QColor(22, 26, 32, 238)))
+        painter.setPen(QPen(QColor(255, 255, 255, 46), 1.4))
+        painter.drawRoundedRect(card, radius, radius)
+
+        painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        grip = self.layout_data.grip
+        painter.drawRoundedRect(grip, grip.height() / 2.0, grip.height() / 2.0)
+
+        heading_font = QFont(self.font())
+        heading_font.setPixelSize(max(10, int(self.layout_data.unit * 0.24)))
+        heading_font.setBold(True)
+        heading_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+        name_font = QFont(self.font())
+        name_font.setPixelSize(max(12, int(self.layout_data.unit * 0.30)))
+        name_font.setBold(True)
+
+        painter.setFont(heading_font)
+        painter.setPen(QColor("#8d9aab"))
+        for rect, text in self.layout_data.headings:
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+
+        timer = self.host.phase_timer
+        for region in self.layout_data.regions:
+            if self._hovered == self._region_key(region):
+                painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
+                painter.setPen(Qt.PenStyle.NoPen)
+                inset = self.layout_data.unit * 0.10
+                painter.drawRoundedRect(
+                    region.rect.adjusted(-inset, -inset * 0.5, inset, inset * 0.5),
+                    inset, inset,
+                )
+
+            if region.kind == "timer":
+                has_value = timer.has_value()
+                paint_timer_dial(
+                    painter, region.tile,
+                    timer.remaining_minutes() if has_value else self.host.cfg.timer_default_minutes,
+                    timer.progress(),
+                    remaining=has_value,
+                )
+            elif region.item is not None:
+                paint_visual_item(painter, region.tile, region.item)
+
+            if not region.label:
+                continue
+            painter.setFont(name_font)
+            painter.setPen(QColor("#eef2f7"))
+            metrics = QFontMetrics(name_font)
+            text = metrics.elidedText(
+                region.label, Qt.TextElideMode.ElideRight, int(region.label_rect.width())
+            )
+            alignment = (
+                Qt.AlignmentFlag.AlignLeft
+                if region.kind == "material"
+                else Qt.AlignmentFlag.AlignHCenter
+            )
+            painter.drawText(region.label_rect, int(alignment | Qt.AlignmentFlag.AlignVCenter), text)
+
+        painter.end()
+
+    @staticmethod
+    def _region_key(region: PanelRegion) -> str:
+        return f"{region.kind}:{region.item.item_id if region.item else ''}"
+
+    # ---- Eingaben
+    def mousePressEvent(self, event):
+        if self.layout_data is None:
+            return
+        global_pos = event.globalPosition().toPoint()
+        if event.button() == Qt.MouseButton.RightButton:
+            self.host.open_window_menu(global_pos)
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        region = self.layout_data.region_at(event.position())
+        if region is None or event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            self._dragging = True
+            self._drag_grab = global_pos.y() - self.y()
+            event.accept()
+            return
+
+        if region.kind == "phase":
+            self.host.open_phase_picker(global_pos)
+        elif region.kind == "material":
+            self.host.open_material_picker(global_pos)
+        elif region.kind == "timer":
+            self.host.open_timer_controls(global_pos)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            available = self.host.current_screen().availableGeometry()
+            target = event.globalPosition().toPoint().y() - self._drag_grab
+            lowest = available.bottom() - self.height() + 1
+            self.move(self.x(), max(available.top(), min(target, lowest)))
+            event.accept()
+            return
+        if self.layout_data is not None:
+            region = self.layout_data.region_at(event.position())
+            key = self._region_key(region) if region else ""
+            if key != self._hovered:
+                self._hovered = key
+                self.setCursor(
+                    Qt.CursorShape.PointingHandCursor if key else Qt.CursorShape.OpenHandCursor
+                )
+                self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._store_position()
+            event.accept()
+
+    def leaveEvent(self, event):
+        if self._hovered:
+            self._hovered = ""
+            self.update()
+        super().leaveEvent(event)
 
 
 class IconPickerPopup(QDialog):
