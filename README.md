@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/florianchristophnowak-dot/TeacherSoundboard?include_prereleases)](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Ein lokales Soundboard für den Unterricht mit visuellen Münz-Buttons, Audio- und Videowiedergabe sowie frei konfigurierbaren Hotkeys.
+Eine lokale, modulare Unterrichtsleiste mit Soundboard, sprachfreier Phasenanzeige, Materialien und Timer.
 
 ## Download
 
@@ -14,7 +14,7 @@ Ein lokales Soundboard für den Unterricht mit visuellen Münz-Buttons, Audio- u
 | macOS 12+ (Apple Silicon: M1–M4) | [DMG](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest/download/TeacherSoundboard-macOS-Apple-Silicon.dmg) | [App als ZIP](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest/download/TeacherSoundboard-macOS-Apple-Silicon.zip) |
 | macOS 12+ (Intel) | [DMG](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest/download/TeacherSoundboard-macOS-Intel.dmg) | [App als ZIP](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest/download/TeacherSoundboard-macOS-Intel.zip) |
 
-Die Download-Links funktionieren, sobald ein Release ab Version `v4.3.0` veröffentlicht wurde. Testpakete eines Pull Requests stehen am Ende des zugehörigen GitHub-Actions-Laufs unter „Artifacts“.
+Die Download-Links funktionieren, sobald ein Release veröffentlicht wurde. Testpakete eines Pull Requests stehen am Ende des zugehörigen GitHub-Actions-Laufs unter „Artifacts“.
 
 ## Installation
 
@@ -50,6 +50,20 @@ Ohne diese Freigabe startet die App weiterhin stabil und ist per Mausklick sowie
 - `Escape`, `Leertaste` oder `S`: Wiedergabe stoppen
 - `Strg+M` (Windows) bzw. `Cmd+M` (macOS): Verwaltung öffnen
 - Globale Standard-Hotkeys: `F1`–`F8`; im Manager frei änderbar
+
+## Modulare Unterrichtsleiste ab v4.4.0
+
+Soundboard, Methode/Sozialform, Materialien und Timer können unabhängig voneinander ein- oder ausgeblendet werden. Ein kleiner Symbolgriff bleibt immer sichtbar, damit ausgeblendete Module erreichbar bleiben.
+
+- Methode oder Sozialform: Symbol anklicken und ein Symbol aus der sprachfreien Auswahl wählen
+- Materialien: Symbol anklicken und beliebig viele Materialien aktivieren
+- Timer: eine der Zahlen `5`, `8` oder `10` wählen oder eine eigene Minutenzahl einstellen
+- Timeranzeige: Gesamtminuten und verbleibende Minuten als zwei Ziffernfelder, ohne Sekunden oder Wörter
+- Fortschritt: kontinuierlich schrumpfender Balken am jeweils angedockten Bildschirmrand
+
+Die mitgelieferten Methoden-/Sozialform- und Materialkataloge lassen sich in der Verwaltung bearbeiten. Eigene Einträge können ergänzt, umbenannt, sortiert oder gelöscht werden. Für jeden Eintrag kann ein eigenes PNG-, JPG- oder SVG-Symbol gewählt werden. Importierte Bilder werden in den lokalen Einstellungsordner kopiert und bleiben daher auch erhalten, wenn die ursprüngliche Datei später verschoben wird.
+
+In der dauerhaft eingeblendeten Unterrichtsleiste und den Auswahltabellen werden ausschließlich Symbole, Bilder und Ziffern verwendet. Bezeichnungen erscheinen nur in der Verwaltung und als Hilfetext.
 
 ## Zuverlässige Medienformate
 
@@ -99,7 +113,7 @@ Ein Paket-Selbsttest ist ohne Benutzeroberfläche möglich:
 python soundboard.py --self-test
 ```
 
-GitHub Actions baut bei jedem Pull Request den Windows-Installer sowie beide macOS-Varianten. Ein Tag wie `v4.3.0` erstellt daraus automatisch ein GitHub Release.
+GitHub Actions baut bei jedem Pull Request den Windows-Installer sowie beide macOS-Varianten. Ein Tag wie `v4.4.0` erstellt daraus automatisch ein GitHub Release.
 
 ## Lizenz
 
