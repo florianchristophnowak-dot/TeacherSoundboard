@@ -365,16 +365,24 @@ def tile_boxes(
 
 # ------------------------------------------------------------- Motivfreistellung
 def _background_color(tile: Image.Image) -> tuple[int, int, int]:
-    """Häufigste Farbe im Randstreifen der Kachel."""
+    """Häufigste Farbe im Ring zwischen 6 % und 16 % der Kachelkante.
+
+    Der Ring liegt innerhalb eines möglichen andersfarbigen Stegs zwischen den
+    Kacheln und zugleich außerhalb des Motivs, das nur die mittleren rund 70 %
+    einnimmt. Der äußerste Rand taugt dafür nicht, weil ein weißer Steg dort
+    sonst als Kachelfarbe gelten würde.
+    """
     width, height = tile.size
-    band = max(1, int(min(width, height) * 0.06))
+    edge = min(width, height)
+    outer = max(1, int(edge * 0.06))
+    inner = max(outer + 1, int(edge * 0.16))
     pixels = tile.load()
     counts: dict[tuple[int, int, int], int] = {}
-    step = max(1, min(width, height) // 48)
+    step = max(1, edge // 96)
     for y in range(0, height, step):
         for x in range(0, width, step):
-            inside_band = x < band or x >= width - band or y < band or y >= height - band
-            if not inside_band:
+            distance = min(x, y, width - 1 - x, height - 1 - y)
+            if not (outer <= distance < inner):
                 continue
             red, green, blue = pixels[x, y][:3]
             key = (red // 8 * 8, green // 8 * 8, blue // 8 * 8)
@@ -382,6 +390,54 @@ def _background_color(tile: Image.Image) -> tuple[int, int, int]:
     if not counts:
         return (0, 0, 0)
     return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def _trim_to_background(
+    tile: Image.Image,
+    background: tuple[int, int, int],
+    tolerance: int = 60,
+    max_share: float = 0.18,
+) -> Image.Image:
+    """Schneidet einen andersfarbigen Steg am Kachelrand weg (z. B. weiße Trennlinie)."""
+    width, height = tile.size
+    pixels = tile.load()
+
+    def matches(x: int, y: int) -> bool:
+        red, green, blue = pixels[x, y][:3]
+        return (
+            abs(red - background[0]) + abs(green - background[1]) + abs(blue - background[2])
+        ) <= tolerance
+
+    def row_is_background(y: int) -> bool:
+        step = max(1, width // 32)
+        sampled = range(0, width, step)
+        hits = sum(1 for x in sampled if matches(x, y))
+        return hits >= len(sampled) * 0.5
+
+    def column_is_background(x: int) -> bool:
+        step = max(1, height // 32)
+        sampled = range(0, height, step)
+        hits = sum(1 for y in sampled if matches(x, y))
+        return hits >= len(sampled) * 0.5
+
+    limit_x = int(width * max_share)
+    limit_y = int(height * max_share)
+    left = 0
+    while left < limit_x and not column_is_background(left):
+        left += 1
+    right = width
+    while right > width - limit_x and not column_is_background(right - 1):
+        right -= 1
+    top = 0
+    while top < limit_y and not row_is_background(top):
+        top += 1
+    bottom = height
+    while bottom > height - limit_y and not row_is_background(bottom - 1):
+        bottom -= 1
+
+    if left >= right or top >= bottom:
+        return tile
+    return tile.crop((left, top, right, bottom))
 
 
 def extract_glyph(
@@ -393,6 +449,7 @@ def extract_glyph(
     """Erzeugt aus einer Kachel ein freigestelltes Motiv mit Alphakanal."""
     tile = tile.convert("RGB")
     background = _background_color(tile)
+    tile = _trim_to_background(tile, background)
     width, height = tile.size
     raw = tile.tobytes()
     output = bytearray(width * height * 4)

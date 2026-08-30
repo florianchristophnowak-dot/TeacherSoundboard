@@ -39,6 +39,7 @@ def build_sheet(
     tile: int = 200,
     margin: int = 37,
     jitter: tuple[int, ...] = (0, 9, -7, 0, 5),
+    gutter: int = 0,
 ) -> None:
     """Baut ein Testblatt mit hellem Rand und leicht ungleichmäßigem Raster."""
     xs = [margin]
@@ -55,6 +56,10 @@ def build_sheet(
             index = row * columns + column
             left, right = xs[column], xs[column + 1]
             top, bottom = ys[row], ys[row + 1]
+            if gutter:
+                # Weißer Steg zwischen den Kacheln, wie ihn Bildmodelle gern einziehen.
+                left, top = left + gutter, top + gutter
+                right, bottom = right - gutter, bottom - gutter
             draw.rectangle([left, top, right - 1, bottom - 1], fill=TILE_COLORS[index])
             width = right - left
             height = bottom - top
@@ -140,6 +145,28 @@ class IconSheetTests(unittest.TestCase):
             self.assertEqual(len(report.cuts_x), 3)
             for cut, expected in zip(report.cuts_x, (200, 409, 602)):
                 self.assertLessEqual(abs(cut - expected), 6, f"Schnitt {cut} statt {expected}")
+
+    def test_white_gutters_do_not_end_up_in_the_icons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sheet = root / "sheet.png"
+            build_sheet(sheet, gutter=7)
+            out = root / "icons"
+
+            report = self.slicer.slice_sheet(
+                sheet, out, list(self.slicer.DEFAULT_KEYS), 4, 4, size=128
+            )
+
+            for tile, expected in zip(report.tiles, TILE_COLORS):
+                detected = self.slicer._parse_color(tile.background)
+                wanted = self.slicer._parse_color(expected)
+                distance = max(abs(a - b) for a, b in zip(detected, wanted))
+                self.assertLessEqual(distance, 10, f"{tile.key}: Steg als Kachelfarbe erkannt")
+                # Ohne Stegabschnitt läge der Motivanteil bei über der Hälfte der Kachel.
+                self.assertLess(tile.coverage, 0.45, f"{tile.key}: Steg im Motiv gelandet")
+            with Image.open(out / "plenum.png") as image:
+                self.assertEqual(image.getpixel((0, 0))[3], 0)
+                self.assertGreater(image.getpixel((64, 64))[3], 200)
 
     def test_single_icon_can_be_replaced_later(self):
         with tempfile.TemporaryDirectory() as tmp:
