@@ -26,15 +26,21 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QLabel,
     QMenu, QHBoxLayout, QVBoxLayout, QMessageBox, QDialog, QGridLayout,
     QLineEdit, QPushButton, QFrame, QSlider, QComboBox, QSpinBox, QCheckBox,
-    QGroupBox
+    QGroupBox, QScrollArea
 )
 
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
+from classroom_modules import (
+    CatalogEditorDialog, IconPickerPopup, PhaseTimer, TimerControlPopup,
+    VisualItem, default_material_items, default_phase_items, paint_action_icon,
+    paint_timer_dial, paint_visual_item, parse_visual_items,
+)
+
 
 APP_NAME = "Teacher Soundboard"
-VERSION = "v4.3.0"
+VERSION = "v4.4.0"
 CONFIG_FILE = "soundboard_config.json"
 
 DEFAULT_BUTTONS = 6
@@ -161,6 +167,16 @@ class AppConfig:
     global_hotkeys_enabled: bool = True  # enable/disable global hotkeys
     stop_hotkey: str = "Escape"  # global hotkey to stop playback
     buttons: list[ButtonConfig] = field(default_factory=list)
+    show_soundboard: bool = True
+    show_phase: bool = False
+    show_materials: bool = False
+    show_timer: bool = False
+    phase_items: list[VisualItem] = field(default_factory=default_phase_items)
+    material_items: list[VisualItem] = field(default_factory=default_material_items)
+    selected_phase_id: str = ""
+    selected_material_ids: list[str] = field(default_factory=list)
+    timer_presets: list[int] = field(default_factory=lambda: [5, 8, 10])
+    timer_default_minutes: int = 5
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -218,6 +234,42 @@ def parse_config(data) -> AppConfig:
     stop_hotkey = data.get("stop_hotkey", "Escape")
     stop_hotkey = str(stop_hotkey or "")
 
+    def config_bool(key: str, default: bool) -> bool:
+        value = data.get(key, default)
+        return value if isinstance(value, bool) else default
+
+    phase_items = parse_visual_items(data.get("phase_items"), default_phase_items)
+    material_items = parse_visual_items(data.get("material_items"), default_material_items)
+    phase_ids = {item.item_id for item in phase_items}
+    material_ids = {item.item_id for item in material_items}
+
+    selected_phase_id = str(data.get("selected_phase_id") or "")
+    if selected_phase_id not in phase_ids:
+        selected_phase_id = ""
+
+    raw_material_ids = data.get("selected_material_ids")
+    if not isinstance(raw_material_ids, list):
+        raw_material_ids = []
+    selected_material_ids = []
+    for item_id in raw_material_ids:
+        item_id = str(item_id)
+        if item_id in material_ids and item_id not in selected_material_ids:
+            selected_material_ids.append(item_id)
+
+    raw_presets = data.get("timer_presets", [5, 8, 10])
+    presets = []
+    if isinstance(raw_presets, list):
+        for value in raw_presets:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if 1 <= parsed <= 999 and parsed not in presets:
+                presets.append(parsed)
+    if not presets:
+        presets = [5, 8, 10]
+    presets = presets[:6]
+
     return AppConfig(
         dock_edge=dock_edge,
         volume=_bounded_float(data.get("volume"), 0.75, 0.0, 1.0),
@@ -229,6 +281,16 @@ def parse_config(data) -> AppConfig:
         global_hotkeys_enabled=enabled,
         stop_hotkey=stop_hotkey,
         buttons=buttons,
+        show_soundboard=config_bool("show_soundboard", True),
+        show_phase=config_bool("show_phase", False),
+        show_materials=config_bool("show_materials", False),
+        show_timer=config_bool("show_timer", False),
+        phase_items=phase_items,
+        material_items=material_items,
+        selected_phase_id=selected_phase_id,
+        selected_material_ids=selected_material_ids,
+        timer_presets=presets,
+        timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
     )
 
 
@@ -749,7 +811,14 @@ class ManageDialog(QDialog):
             max(560, min(700, available.height() - 60)),
         )
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget(scroll)
+        root = QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
 
         header = QLabel("Medien, Button-Bilder, Hotkeys, Lautstärke & Audio-Ausgabe")
         header.setStyleSheet("font-size: 18px; font-weight: 700;")
@@ -865,6 +934,33 @@ class ManageDialog(QDialog):
         hotkey_info.setWordWrap(True)
         root.addWidget(hotkey_info)
 
+        # ---- Integrated classroom modules ----
+        classroom_group = QGroupBox("Optionale Unterrichtsleiste")
+        classroom_layout = QHBoxLayout(classroom_group)
+        self.module_checks: dict[str, QCheckBox] = {}
+        for key, label in [
+            ("soundboard", "Soundboard"),
+            ("phase", "Methode/Sozialform"),
+            ("materials", "Materialien"),
+            ("timer", "Timer"),
+        ]:
+            checkbox = QCheckBox(label)
+            checkbox.stateChanged.connect(
+                lambda state, module=key: self._on_module_changed(module, state)
+            )
+            classroom_layout.addWidget(checkbox)
+            self.module_checks[key] = checkbox
+
+        classroom_layout.addSpacing(12)
+        phase_catalog = QPushButton("Methoden/Sozialformen bearbeiten…")
+        phase_catalog.clicked.connect(lambda: self.host.open_catalog_editor("phase"))
+        classroom_layout.addWidget(phase_catalog)
+        material_catalog = QPushButton("Materialien bearbeiten…")
+        material_catalog.clicked.connect(lambda: self.host.open_catalog_editor("materials"))
+        classroom_layout.addWidget(material_catalog)
+        classroom_layout.addStretch(1)
+        root.addWidget(classroom_group)
+
         line2 = QFrame()
         line2.setFrameShape(QFrame.Shape.HLine)
         line2.setFrameShadow(QFrame.Shadow.Sunken)
@@ -956,7 +1052,7 @@ class ManageDialog(QDialog):
             grid.addWidget(actions, row, 6)
 
         footer = QHBoxLayout()
-        root.addLayout(footer)
+        outer.addLayout(footer)
 
         self.btn_close = QPushButton("Schließen")
         self.btn_close.clicked.connect(self.accept)
@@ -1000,6 +1096,17 @@ class ManageDialog(QDialog):
         self.count_spin.blockSignals(True)
         self.count_spin.setValue(int(self.host.cfg.visible_buttons))
         self.count_spin.blockSignals(False)
+
+        module_values = {
+            "soundboard": self.host.cfg.show_soundboard,
+            "phase": self.host.cfg.show_phase,
+            "materials": self.host.cfg.show_materials,
+            "timer": self.host.cfg.show_timer,
+        }
+        for key, checkbox in self.module_checks.items():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(module_values[key])
+            checkbox.blockSignals(False)
 
         # Global hotkeys
         self.global_hotkeys_check.blockSignals(True)
@@ -1047,6 +1154,9 @@ class ManageDialog(QDialog):
     def _on_count_changed(self, value: int):
         self.host.set_visible_buttons(int(value))
 
+    def _on_module_changed(self, module: str, state):
+        self.host.set_module_visible(module, state == Qt.CheckState.Checked.value)
+
     def _on_global_hotkeys_changed(self, state):
         self.host.set_global_hotkeys_enabled(state == Qt.CheckState.Checked.value)
 
@@ -1061,7 +1171,7 @@ class ManageDialog(QDialog):
         self.refresh()
 
 
-# ---------------- Custom painted coin bar ----------------
+# ---------------- Custom painted modular classroom bar ----------------
 class CoinBar(QWidget):
     def __init__(self, host):
         super().__init__(host)
@@ -1074,19 +1184,22 @@ class CoinBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        for i in range(self.host.visible_count()):
-            coin = self.host.coin_rect(i)
-            pm = self.host.coin_pixmap(i, int(coin.width()))
-            p.drawPixmap(int(round(coin.x())), int(round(coin.y())), pm)
+        if self.host.cfg.show_soundboard:
+            for i in range(self.host.visible_count()):
+                coin = self.host.coin_rect(i)
+                pm = self.host.coin_pixmap(i, int(coin.width()))
+                p.drawPixmap(int(round(coin.x())), int(round(coin.y())), pm)
 
-            if (
-                self.host.current_index == i
-                and self.host.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
-            ):
-                ring = QRectF(coin).adjusted(-3, -3, 3, 3)
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(QColor(0, 200, 255, 200), 4))
-                p.drawEllipse(ring)
+                if (
+                    self.host.current_index == i
+                    and self.host.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                ):
+                    ring = QRectF(coin).adjusted(-3, -3, 3, 3)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(QColor(0, 200, 255, 200), 4))
+                    p.drawEllipse(ring)
+
+        self.host.paint_classroom_modules(p)
 
         p.end()
 
@@ -1100,11 +1213,11 @@ class CoinBar(QWidget):
             return
 
         if event.button() == Qt.MouseButton.RightButton:
-            idx = self.host.hit_test(lp)
-            if idx is None:
-                self.host.open_window_menu(gp)
+            target = self.host.hit_target(lp)
+            if target and target[0] == "sound":
+                self.host.open_coin_menu(int(target[1]), gp)
             else:
-                self.host.open_coin_menu(idx, gp)
+                self.host.open_window_menu(gp)
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1113,11 +1226,11 @@ class CoinBar(QWidget):
                 event.accept()
                 return
 
-            idx = self.host.hit_test(lp)
-            if idx is None:
+            target = self.host.hit_target(lp)
+            if target is None:
                 self.host.start_drag(gp)
             else:
-                self.host.on_coin_clicked(idx)
+                self.host.activate_target(target, gp)
             event.accept()
 
     def mouseMoveEvent(self, event):
@@ -1152,6 +1265,14 @@ class SoundboardWindow(QMainWindow):
         self.config_path = get_config_path()
         self.last_config_error = ""
         self.cfg = self.load_config()
+
+        self.phase_timer = PhaseTimer()
+        self._module_tick = QTimer(self)
+        self._module_tick.setInterval(200)
+        self._module_tick.timeout.connect(self._on_module_tick)
+        self._picker_popup: IconPickerPopup | None = None
+        self._timer_popup: TimerControlPopup | None = None
+        self._catalog_dialogs: dict[str, CatalogEditorDialog] = {}
 
         self.current_index: int | None = None
         self.current_is_video = False
@@ -1418,6 +1539,16 @@ class SoundboardWindow(QMainWindow):
             "global_hotkeys_enabled": self.cfg.global_hotkeys_enabled,
             "stop_hotkey": self.cfg.stop_hotkey,
             "buttons": [asdict(b) for b in self.cfg.buttons],
+            "show_soundboard": self.cfg.show_soundboard,
+            "show_phase": self.cfg.show_phase,
+            "show_materials": self.cfg.show_materials,
+            "show_timer": self.cfg.show_timer,
+            "phase_items": [item.to_dict() for item in self.cfg.phase_items],
+            "material_items": [item.to_dict() for item in self.cfg.material_items],
+            "selected_phase_id": self.cfg.selected_phase_id,
+            "selected_material_ids": list(self.cfg.selected_material_ids),
+            "timer_presets": list(self.cfg.timer_presets),
+            "timer_default_minutes": self.cfg.timer_default_minutes,
         }
         try:
             atomic_write_json(self.config_path, data)
@@ -1466,42 +1597,66 @@ class SoundboardWindow(QMainWindow):
             self.manager_dialog.refresh()
 
     # ---- Sizes
+    def selected_phase_item(self) -> VisualItem | None:
+        for item in self.cfg.phase_items:
+            if item.item_id == self.cfg.selected_phase_id:
+                return item
+        return None
+
+    def selected_material_items(self) -> list[VisualItem]:
+        by_id = {item.item_id: item for item in self.cfg.material_items}
+        return [by_id[item_id] for item_id in self.cfg.selected_material_ids if item_id in by_id]
+
+    def display_slots(self) -> list[tuple[str, object]]:
+        slots: list[tuple[str, object]] = []
+        if self.cfg.show_soundboard:
+            slots.extend(("sound", index) for index in range(self.visible_count()))
+        if self.cfg.show_phase:
+            slots.append(("phase", self.selected_phase_item()))
+        if self.cfg.show_materials:
+            materials = self.selected_material_items()
+            if materials:
+                slots.extend(("material", item) for item in materials)
+            else:
+                slots.append(("material", None))
+        if self.cfg.show_timer:
+            slots.extend([("timer-total", None), ("timer-remaining", None)])
+        # A language-independent handle remains available even if every module is hidden.
+        slots.append(("handle", None))
+        return slots
+
     def compute_sizes_for_edge(self, edge: str):
         screen = self.current_screen()
         g = screen.availableGeometry()
-        n = self.visible_count()
+        slot_count = max(1, len(self.display_slots()))
 
         available = g.height() if edge in ("left", "right") else g.width()
-        total_spacing = SPACING * (n - 1)
+        total_spacing = SPACING * (slot_count - 1)
         available -= (MARGIN * 2 + total_spacing)
 
-        mult = SIZE_MULT[:n]
-        mult_sum = sum(mult) or 1.0
-        base = available / mult_sum
-        base = max(MIN_COIN, min(MAX_COIN, base))
-
+        self.slot_size = max(34, min(MAX_COIN, int(available / slot_count)))
         sizes = []
-        for m in mult:
-            s = int(round(base * m))
-            s = max(MIN_COIN, min(MAX_COIN, s))
-            sizes.append(s)
+        min_mult, max_mult = min(SIZE_MULT), max(SIZE_MULT)
+        for multiplier in SIZE_MULT:
+            relative = (multiplier - min_mult) / max(0.01, max_mult - min_mult)
+            factor = 0.76 + relative * 0.24
+            sizes.append(max(30, min(self.slot_size, int(round(self.slot_size * factor)))))
 
         while len(sizes) < MAX_BUTTONS:
-            sizes.append(max(MIN_COIN, min(MAX_COIN, int(round(base)))))
+            sizes.append(self.slot_size)
 
         self.coin_sizes = sizes
-        self.slot_size = max(sizes[:n])
 
     def set_window_size_for_edge(self, edge: str):
-        n = self.visible_count()
-        total_spacing = SPACING * (n - 1)
+        slot_count = max(1, len(self.display_slots()))
+        total_spacing = SPACING * (slot_count - 1)
         total_margin = MARGIN * 2
 
         if edge in ("left", "right"):
             w = self.slot_size + total_margin
-            h = n * self.slot_size + total_spacing + total_margin
+            h = slot_count * self.slot_size + total_spacing + total_margin
         else:
-            w = n * self.slot_size + total_spacing + total_margin
+            w = slot_count * self.slot_size + total_spacing + total_margin
             h = self.slot_size + total_margin
 
         self.setFixedSize(int(w), int(h))
@@ -1535,16 +1690,17 @@ class SoundboardWindow(QMainWindow):
 
         return QRectF(x, y, coin, coin)
 
-    def hit_test(self, local_pos: QPoint) -> int | None:
-        for i in range(self.visible_count()):
-            r = self.coin_rect(i)
-            cx = r.x() + r.width() / 2.0
-            cy = r.y() + r.height() / 2.0
-            dx = local_pos.x() + 0.5 - cx
-            dy = local_pos.y() + 0.5 - cy
-            rr = (min(r.width(), r.height()) / 2.0 - 1.5) ** 2
-            if (dx * dx + dy * dy) <= rr:
-                return i
+    def hit_target(self, local_pos: QPoint) -> tuple[str, object] | None:
+        for slot_index, target in enumerate(self.display_slots()):
+            rect = self.coin_rect(int(target[1])) if target[0] == "sound" else self.slot_rect(slot_index)
+            if target[0] == "sound":
+                cx, cy = rect.center().x(), rect.center().y()
+                dx = local_pos.x() + 0.5 - cx
+                dy = local_pos.y() + 0.5 - cy
+                if dx*dx + dy*dy <= (min(rect.width(), rect.height())/2.0 - 1.5)**2:
+                    return target
+            elif rect.contains(QPointF(local_pos)):
+                return target
         return None
 
     # ---- Coin images
@@ -1597,6 +1753,259 @@ class SoundboardWindow(QMainWindow):
         p.end()
         return pm
 
+    # ---- Integrated classroom modules
+    def paint_classroom_modules(self, painter: QPainter) -> None:
+        slots = self.display_slots()
+        phase_placeholder = VisualItem("phase-placeholder", "", "phase-placeholder")
+        material_placeholder = VisualItem("material-placeholder", "", "material-placeholder")
+        timer_progress = self.phase_timer.progress()
+
+        for slot_index, (kind, payload) in enumerate(slots):
+            if kind == "sound":
+                continue
+            rect = self.slot_rect(slot_index)
+            if kind == "phase":
+                paint_visual_item(painter, rect, payload or phase_placeholder, payload is not None)
+            elif kind == "material":
+                paint_visual_item(painter, rect, payload or material_placeholder, payload is not None)
+            elif kind == "timer-total":
+                paint_timer_dial(
+                    painter, rect, self.phase_timer.total_minutes(),
+                    timer_progress, remaining=False,
+                )
+            elif kind == "timer-remaining":
+                paint_timer_dial(
+                    painter, rect, self.phase_timer.remaining_minutes(),
+                    timer_progress, remaining=True,
+                )
+            elif kind == "handle":
+                inset = rect.width() * 0.15
+                inner = rect.adjusted(inset, inset, -inset, -inset)
+                painter.setPen(QPen(QColor(255, 255, 255, 70), max(1.0, rect.width()*0.025)))
+                painter.setBrush(QBrush(QColor(28, 33, 39, 218)))
+                painter.drawRoundedRect(inner, inner.width()*0.25, inner.height()*0.25)
+                paint_action_icon(painter, inner.adjusted(5, 5, -5, -5), "menu")
+
+        if self.cfg.show_timer and self.phase_timer.has_value():
+            self._paint_edge_progress(painter, timer_progress)
+
+    def _paint_edge_progress(self, painter: QPainter, progress: float) -> None:
+        thickness = max(5.0, min(9.0, self.slot_size * 0.10))
+        track_color = QColor(255, 255, 255, 65)
+        active_color = (
+            QColor("#63c6a0") if progress > 0.20
+            else QColor("#eda34d") if progress > 0
+            else QColor("#df5d67")
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(track_color))
+        edge = self.cfg.dock_edge
+        if edge in ("top", "bottom"):
+            y = 0.0 if edge == "top" else self.height() - thickness
+            track = QRectF(0, y, self.width(), thickness)
+            fill = QRectF(track.x(), track.y(), track.width()*progress, track.height())
+        else:
+            x = 0.0 if edge == "left" else self.width() - thickness
+            track = QRectF(x, 0, thickness, self.height())
+            fill_height = track.height()*progress
+            fill = QRectF(track.x(), track.bottom() - fill_height, track.width(), fill_height)
+        painter.drawRect(track)
+        painter.setBrush(QBrush(active_color))
+        painter.drawRect(fill)
+
+    def _refresh_module_layout(self, persist: bool = True) -> None:
+        if persist:
+            self.save_config()
+        self.compute_sizes_for_edge(self.cfg.dock_edge)
+        self.set_window_size_for_edge(self.cfg.dock_edge)
+        self.bar.update()
+        if self.isVisible():
+            self.snap_to_edge(self.cfg.dock_edge)
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
+
+    def set_module_visible(self, module: str, visible: bool) -> None:
+        field_name = {
+            "soundboard": "show_soundboard",
+            "phase": "show_phase",
+            "materials": "show_materials",
+            "timer": "show_timer",
+        }.get(module)
+        if not field_name:
+            return
+        setattr(self.cfg, field_name, bool(visible))
+        self._refresh_module_layout()
+
+    def activate_target(self, target: tuple[str, object], global_pos: QPoint) -> None:
+        kind, payload = target
+        if kind == "sound":
+            self.on_coin_clicked(int(payload))
+        elif kind == "phase":
+            self.open_phase_picker(global_pos)
+        elif kind == "material":
+            self.open_material_picker(global_pos)
+        elif kind in ("timer-total", "timer-remaining"):
+            self.open_timer_controls(global_pos)
+        elif kind == "handle":
+            self.open_window_menu(global_pos)
+
+    def _position_popup(self, popup: QDialog, global_pos: QPoint) -> None:
+        popup.adjustSize()
+        screen = QGuiApplication.screenAt(global_pos) or self.current_screen()
+        available = screen.availableGeometry()
+        x = max(available.left(), min(global_pos.x() + 6, available.right() - popup.width() + 1))
+        y = max(available.top(), min(global_pos.y() + 6, available.bottom() - popup.height() + 1))
+        popup.move(x, y)
+
+    def open_phase_picker(self, global_pos: QPoint) -> None:
+        popup = IconPickerPopup(
+            self.cfg.phase_items,
+            {self.cfg.selected_phase_id} if self.cfg.selected_phase_id else set(),
+            multi_select=False,
+            parent=self,
+        )
+        popup.itemToggled.connect(self.set_selected_phase)
+        popup.cleared.connect(lambda: self.set_selected_phase(""))
+        self._picker_popup = popup
+        self._position_popup(popup, global_pos)
+        popup.show()
+
+    def open_material_picker(self, global_pos: QPoint) -> None:
+        popup = IconPickerPopup(
+            self.cfg.material_items,
+            set(self.cfg.selected_material_ids),
+            multi_select=True,
+            parent=self,
+        )
+        popup.itemToggled.connect(self.toggle_selected_material)
+        popup.cleared.connect(self.clear_selected_materials)
+        self._picker_popup = popup
+        self._position_popup(popup, global_pos)
+        popup.show()
+
+    def set_selected_phase(self, item_id: str) -> None:
+        valid_ids = {item.item_id for item in self.cfg.phase_items}
+        self.cfg.selected_phase_id = item_id if item_id in valid_ids else ""
+        self.save_config()
+        self.bar.update()
+
+    def toggle_selected_material(self, item_id: str) -> None:
+        valid_ids = {item.item_id for item in self.cfg.material_items}
+        if item_id not in valid_ids:
+            return
+        if item_id in self.cfg.selected_material_ids:
+            self.cfg.selected_material_ids.remove(item_id)
+        else:
+            self.cfg.selected_material_ids.append(item_id)
+        self._refresh_module_layout()
+
+    def clear_selected_materials(self) -> None:
+        self.cfg.selected_material_ids = []
+        self._refresh_module_layout()
+
+    def open_timer_controls(self, global_pos: QPoint) -> None:
+        popup = TimerControlPopup(
+            self.cfg.timer_presets,
+            self.phase_timer.total_minutes() or self.cfg.timer_default_minutes,
+            self.phase_timer.running,
+            parent=self,
+        )
+        popup.startRequested.connect(self.start_phase_timer)
+        popup.pauseRequested.connect(self.toggle_phase_timer)
+        popup.resetRequested.connect(self.reset_phase_timer)
+        popup.addMinuteRequested.connect(lambda: self.add_phase_minutes(1))
+        popup.clearRequested.connect(self.clear_phase_timer)
+        self._timer_popup = popup
+        self._position_popup(popup, global_pos)
+        popup.show()
+
+    def start_phase_timer(self, minutes: int) -> None:
+        minutes = max(1, min(999, int(minutes)))
+        self.cfg.timer_default_minutes = minutes
+        self.save_config()
+        self.phase_timer.start(minutes)
+        self._module_tick.start()
+        self.bar.update()
+
+    def toggle_phase_timer(self) -> None:
+        if not self.phase_timer.has_value():
+            self.start_phase_timer(self.cfg.timer_default_minutes)
+            return
+        self.phase_timer.toggle_pause()
+        if self.phase_timer.running:
+            self._module_tick.start()
+        self.bar.update()
+
+    def reset_phase_timer(self) -> None:
+        if not self.phase_timer.has_value():
+            self.start_phase_timer(self.cfg.timer_default_minutes)
+            return
+        self.phase_timer.reset()
+        self._module_tick.start()
+        self.bar.update()
+
+    def add_phase_minutes(self, minutes: int) -> None:
+        self.phase_timer.add_minutes(minutes)
+        if self.phase_timer.running:
+            self._module_tick.start()
+        self.bar.update()
+
+    def clear_phase_timer(self) -> None:
+        self.phase_timer.clear()
+        self._module_tick.stop()
+        self.bar.update()
+
+    def _on_module_tick(self) -> None:
+        self.phase_timer.remaining_seconds()
+        self.bar.update()
+        if not self.phase_timer.running:
+            self._module_tick.stop()
+
+    def open_catalog_editor(self, catalog: str) -> None:
+        if catalog == "phase":
+            title = "Methoden und Sozialformen"
+            items = self.cfg.phase_items
+            defaults = default_phase_items
+        elif catalog == "materials":
+            title = "Materialien"
+            items = self.cfg.material_items
+            defaults = default_material_items
+        else:
+            return
+
+        existing = self._catalog_dialogs.get(catalog)
+        if existing and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        dialog = CatalogEditorDialog(
+            title,
+            items,
+            self.config_path.parent / "icons",
+            defaults,
+            lambda changed_items, kind=catalog: self._catalog_changed(kind, changed_items),
+            parent=self,
+        )
+        self._catalog_dialogs[catalog] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _catalog_changed(self, catalog: str, items: list[VisualItem]) -> None:
+        if catalog == "phase":
+            self.cfg.phase_items = items
+            valid_ids = {item.item_id for item in items}
+            if self.cfg.selected_phase_id not in valid_ids:
+                self.cfg.selected_phase_id = ""
+        else:
+            self.cfg.material_items = items
+            valid_ids = {item.item_id for item in items}
+            self.cfg.selected_material_ids = [
+                item_id for item_id in self.cfg.selected_material_ids if item_id in valid_ids
+            ]
+        self._refresh_module_layout()
+
     # ---- Manager
     def open_manager(self):
         if self.manager_dialog is None:
@@ -1632,12 +2041,30 @@ class SoundboardWindow(QMainWindow):
             act.triggered.connect(lambda checked=False, p=pct: self.set_volume(p / 100.0))
             vol_menu.addAction(act)
 
+    def add_modules_submenu(self, menu: QMenu):
+        module_menu = menu.addMenu("Unterrichtsleiste")
+        modules = [
+            ("soundboard", "Soundboard", self.cfg.show_soundboard),
+            ("phase", "Methode/Sozialform", self.cfg.show_phase),
+            ("materials", "Materialien", self.cfg.show_materials),
+            ("timer", "Timer", self.cfg.show_timer),
+        ]
+        for key, label, visible in modules:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(visible)
+            action.triggered.connect(
+                lambda checked=False, module=key: self.set_module_visible(module, checked)
+            )
+            module_menu.addAction(action)
+
     def open_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background: #222; color: #eee; }")
         self.add_dock_submenu(menu)
         self.add_video_submenu(menu)
         self.add_volume_submenu(menu)
+        self.add_modules_submenu(menu)
 
         act_manage = QAction(f"Verwalten… ({ui_modifier_label()}+M)", self)
         act_manage.triggered.connect(self.open_manager)
@@ -1683,6 +2110,7 @@ class SoundboardWindow(QMainWindow):
         self.add_dock_submenu(menu)
         self.add_video_submenu(menu)
         self.add_volume_submenu(menu)
+        self.add_modules_submenu(menu)
 
         act_manage = QAction(f"Verwalten… ({ui_modifier_label()}+M)", self)
         act_manage.triggered.connect(self.open_manager)
@@ -1919,9 +2347,16 @@ class SoundboardWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up when closing."""
+        self._module_tick.stop()
         self.hotkey_manager.stop()
         self.player.stop()
         self.video_overlay.close()
+        if self._picker_popup:
+            self._picker_popup.close()
+        if self._timer_popup:
+            self._timer_popup.close()
+        for dialog in self._catalog_dialogs.values():
+            dialog.close()
         if self.manager_dialog:
             self.manager_dialog.close()
         super().closeEvent(event)
@@ -1979,10 +2414,23 @@ def run_self_test(app: QApplication) -> int:
                 {"global_hotkeys_enabled": False},
             )
             window = SoundboardWindow()
+            window.cfg.show_phase = True
+            window.cfg.show_materials = True
+            window.cfg.show_timer = True
+            window.cfg.selected_phase_id = window.cfg.phase_items[0].item_id
+            window.cfg.selected_material_ids = [window.cfg.material_items[0].item_id]
+            window.start_phase_timer(5)
+            window._refresh_module_layout(persist=False)
             window.show()
             app.processEvents()
             if not window.isVisible():
                 raise RuntimeError("Main window did not become visible")
+            slot_kinds = [kind for kind, _payload in window.display_slots()]
+            if not {"sound", "phase", "material", "timer-total", "timer-remaining", "handle"}.issubset(slot_kinds):
+                raise RuntimeError(f"Classroom modules missing from layout: {slot_kinds}")
+            preview = window.bar.grab()
+            if preview.isNull():
+                raise RuntimeError("Classroom bar did not render")
 
             window.audio.setVolume(0.5)
             media_player_available = window.player.isAvailable()
@@ -2004,6 +2452,7 @@ def run_self_test(app: QApplication) -> int:
             "main_window_created": True,
             "media_player_available": media_player_available,
             "global_hotkeys_imported": GLOBAL_HOTKEYS_AVAILABLE,
+            "classroom_modules_rendered": True,
         }))
         return 0
     except Exception:
