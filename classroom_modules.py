@@ -493,6 +493,21 @@ def paint_timer_dial(
 # ---------------- Unterrichtspanel am rechten Bildschirmrand ----------------
 PANEL_MIN_UNIT = 36
 PANEL_MAX_UNIT = 96
+
+
+def panel_name_font(base: QFont, unit: int) -> QFont:
+    font = QFont(base)
+    font.setPixelSize(max(12, int(unit * 0.30)))
+    font.setBold(True)
+    return font
+
+
+def panel_heading_font(base: QFont, unit: int) -> QFont:
+    font = QFont(base)
+    font.setPixelSize(max(10, int(unit * 0.24)))
+    font.setBold(True)
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+    return font
 PANEL_HEADING_PHASE = "SOZIALFORM"
 PANEL_HEADING_MATERIAL = "MATERIAL"
 PANEL_HEADING_TIMER = "ZEIT"
@@ -536,6 +551,7 @@ def build_panel_layout(
     show_labels: bool = True,
     timer_minutes: int = 0,
     timer_total: int = 0,
+    measure: Callable[[str], int] | None = None,
 ) -> PanelLayout:
     """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar."""
     unit = max(PANEL_MIN_UNIT, int(unit))
@@ -544,11 +560,31 @@ def build_panel_layout(
     row_gap = round(unit * 0.16)
     big = round(unit * 1.50)
     small = unit
-    text_width = round(unit * 2.20)
     heading_height = round(unit * 0.42) if show_labels else 0
     name_height = round(unit * 0.48) if show_labels else 0
     dial = round(unit * 1.60)
     grip_height = round(unit * 0.26)
+
+    phase_display = phase_item or VisualItem(
+        "phase-placeholder", "Sozialform wählen", "phase-placeholder"
+    )
+    material_display = material_items or [
+        VisualItem("material-placeholder", "Material wählen", "material-placeholder")
+    ]
+
+    # Die Namensspalte wird an der tatsächlichen Textbreite ausgerichtet: eigene
+    # Bezeichnungen und die Systemschrift unterscheiden sich je nach Rechner.
+    text_width = round(unit * 2.50)
+    if show_labels and measure is not None:
+        needed = [measure(item.name) for item in material_display] if show_materials else []
+        if show_phase:
+            # Der Name der Sozialform steht über der vollen Breite, nicht nur über der Spalte.
+            needed.append(measure(phase_display.name) - (small + row_gap))
+        if needed:
+            text_width = int(max(
+                round(unit * 1.60),
+                min(round(unit * 3.60), max(needed) + round(unit * 0.20)),
+            ))
 
     content_width = (small + row_gap + text_width) if show_labels else big
     width = pad * 2 + content_width
@@ -571,7 +607,7 @@ def build_panel_layout(
 
     if show_phase:
         add_heading(PANEL_HEADING_PHASE)
-        item = phase_item or VisualItem("phase-placeholder", "Sozialform wählen", "phase-placeholder")
+        item = phase_display
         tile = QRectF(left + (content_width - big) / 2.0, y, big, big)
         label_rect = QRectF(left, y + big, content_width, name_height)
         layout.regions.append(PanelRegion(
@@ -582,10 +618,7 @@ def build_panel_layout(
 
     if show_materials:
         add_heading(PANEL_HEADING_MATERIAL)
-        items = material_items or [
-            VisualItem("material-placeholder", "Material wählen", "material-placeholder")
-        ]
-        for index, item in enumerate(items):
+        for index, item in enumerate(material_display):
             if index:
                 y += row_gap
             tile = QRectF(left, y, small, small)
@@ -676,6 +709,7 @@ class ClassroomPanel(QWidget):
                 show_labels=cfg.panel_show_labels,
                 timer_minutes=timer.remaining_minutes(),
                 timer_total=timer.total_minutes(),
+                measure=QFontMetrics(panel_name_font(self.font(), unit)).horizontalAdvance,
             )
             if layout.height <= available.height() or unit <= PANEL_MIN_UNIT:
                 break
@@ -726,13 +760,8 @@ class ClassroomPanel(QWidget):
         grip = self.layout_data.grip
         painter.drawRoundedRect(grip, grip.height() / 2.0, grip.height() / 2.0)
 
-        heading_font = QFont(self.font())
-        heading_font.setPixelSize(max(10, int(self.layout_data.unit * 0.24)))
-        heading_font.setBold(True)
-        heading_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
-        name_font = QFont(self.font())
-        name_font.setPixelSize(max(12, int(self.layout_data.unit * 0.30)))
-        name_font.setBold(True)
+        heading_font = panel_heading_font(self.font(), self.layout_data.unit)
+        name_font = panel_name_font(self.font(), self.layout_data.unit)
 
         painter.setFont(heading_font)
         painter.setPen(QColor("#8d9aab"))
