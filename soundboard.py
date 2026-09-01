@@ -2622,7 +2622,14 @@ def run_self_test(app: QApplication) -> int:
         }))
         return 0
     except Exception:
-        traceback.print_exc()
+        details = traceback.format_exc()
+        print(details, file=sys.stderr)
+        diagnostic_path = os.environ.get("TEACHER_SOUNDBOARD_SELF_TEST_LOG")
+        if diagnostic_path:
+            try:
+                Path(diagnostic_path).write_text(details, encoding="utf-8")
+            except OSError:
+                pass
         return 1
     finally:
         if window is not None:
