@@ -26,3 +26,6 @@ Thumbs.db
 
 # Config (lokal)
 soundboard_config.json
+
+# Bericht des Symbol-Zuschnitts (Zwischenergebnis)
+assets/icons/sheet-report.json

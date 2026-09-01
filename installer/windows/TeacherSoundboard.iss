@@ -1,5 +1,5 @@
 #define MyAppName "Teacher Soundboard"
-#define MyAppVersion "4.4.0"
+#define MyAppVersion "4.5.0"
 #define MyAppPublisher "Florian Nowak"
 #define MyAppExeName "TeacherSoundboard.exe"
 #define RepoRoot AddBackslash(SourcePath) + "..\..\"
@@ -24,7 +24,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
-VersionInfoVersion=4.4.0.0
+VersionInfoVersion=4.5.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Installer
 VersionInfoProductName={#MyAppName}
