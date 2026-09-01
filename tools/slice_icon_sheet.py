@@ -57,6 +57,8 @@ FALLBACK_COLOR = "#3f4854"
 DETECT_MAX_SIDE = 512
 CHANGE_THRESHOLD = 40      # Summe der Kanalunterschiede, ab der ein Pixel als "anders" gilt
 MIN_BORDER_SHARE = 0.60    # Anteil der Linien, der sich an einer echten Rasterkante ändern muss
+BUCKET_SIZE = 32           # Grobstufe, in der Farben für die Hintergrundsuche gebündelt werden
+CLUSTER_TOLERANCE = 60     # Summe der Kanalabstände, bis zu der zwei Bündel derselbe Farbton sind
 MARGIN_LUMINANCE = 232
 MARGIN_MAX_SHARE = 0.25
 
@@ -377,19 +379,42 @@ def _background_color(tile: Image.Image) -> tuple[int, int, int]:
     outer = max(1, int(edge * 0.06))
     inner = max(outer + 1, int(edge * 0.16))
     pixels = tile.load()
-    counts: dict[tuple[int, int, int], int] = {}
     step = max(1, edge // 96)
+
+    # Grob bündeln und die Summen mitführen, um am Ende genau mitteln zu können.
+    buckets: dict[tuple[int, int, int], list[int]] = {}
     for y in range(0, height, step):
         for x in range(0, width, step):
             distance = min(x, y, width - 1 - x, height - 1 - y)
             if not (outer <= distance < inner):
                 continue
             red, green, blue = pixels[x, y][:3]
-            key = (red // 8 * 8, green // 8 * 8, blue // 8 * 8)
-            counts[key] = counts.get(key, 0) + 1
-    if not counts:
+            key = (red // BUCKET_SIZE, green // BUCKET_SIZE, blue // BUCKET_SIZE)
+            entry = buckets.setdefault(key, [0, 0, 0, 0])
+            entry[0] += 1
+            entry[1] += red
+            entry[2] += green
+            entry[3] += blue
+    if not buckets:
         return (0, 0, 0)
-    return max(counts.items(), key=lambda item: item[1])[0]
+
+    # Benachbarte Bündel zusammenfassen: eine flächige Farbe rauscht über
+    # mehrere Stufen, ein reines Weiß landet in einer einzigen. Ohne diesen
+    # Schritt gewinnt ein großes weißes Motiv gegen den echten Hintergrund.
+    clusters: list[list[int]] = []
+    for _key, entry in sorted(buckets.items(), key=lambda item: -item[1][0]):
+        center = [entry[i + 1] / entry[0] for i in range(3)]
+        for cluster in clusters:
+            reference = [cluster[i + 1] / cluster[0] for i in range(3)]
+            if sum(abs(a - b) for a, b in zip(center, reference)) <= CLUSTER_TOLERANCE:
+                for index in range(4):
+                    cluster[index] += entry[index]
+                break
+        else:
+            clusters.append(list(entry))
+
+    best = max(clusters, key=lambda cluster: cluster[0])
+    return tuple(int(round(best[i + 1] / best[0])) for i in range(3))  # type: ignore[return-value]
 
 
 def _trim_to_background(

@@ -168,6 +168,36 @@ class IconSheetTests(unittest.TestCase):
                 self.assertEqual(image.getpixel((0, 0))[3], 0)
                 self.assertGreater(image.getpixel((64, 64))[3], 200)
 
+    def test_a_large_motif_does_not_get_mistaken_for_the_background(self):
+        # Ein Motiv, das bis in den Randstreifen reicht, während der flächige
+        # Hintergrund leicht rauscht: Ohne Bündelung benachbarter Farbtöne
+        # gewinnt das reine Weiß gegen den über viele Stufen verteilten Ton.
+        import random
+
+        random.seed(11)
+        tile = Image.new("RGB", (512, 512), (215, 120, 10))
+        pixels = tile.load()
+        for y in range(512):
+            for x in range(512):
+                red, green, blue = pixels[x, y]
+                # Pro Kanal unabhängig, wie bei erzeugten Bildern: der Farbton
+                # verteilt sich dadurch über mehrere feine Stufen.
+                pixels[x, y] = (
+                    red + random.randint(-5, 5),
+                    green + random.randint(-5, 5),
+                    blue + random.randint(-5, 5),
+                )
+        # Das Motiv ragt in den Randstreifen, beherrscht ihn aber nicht: gut ein
+        # Viertel weiß, wie beim Arbeitsheft des echten Blatts. Ohne Bündelung
+        # gewinnt dieses eine reine Weiß gegen den fein verteilten Orangeton.
+        ImageDraw.Draw(tile).rounded_rectangle([66, 66, 445, 445], radius=18, fill="white")
+
+        background = self.slicer._background_color(tile)
+        self.assertLess(
+            max(abs(a - b) for a, b in zip(background, (215, 120, 10))), 12,
+            f"Hintergrund als {background} erkannt statt als Orange",
+        )
+
     def test_single_icon_can_be_replaced_later(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

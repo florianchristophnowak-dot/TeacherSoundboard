@@ -54,7 +54,7 @@ jobs:
             --name TeacherSoundboard `
             --version-file installer/windows/version_info.txt `
             --collect-submodules pynput `
-            --add-data "assets;assets" `
+            --add-data "assets/icons;assets/icons" `
             soundboard.py
 
       - name: Test packaged application
@@ -138,7 +138,7 @@ jobs:
             --osx-bundle-identifier de.floriannowak.teachersoundboard \
             --target-architecture "${{ matrix.arch }}" \
             --collect-submodules pynput \
-            --add-data "assets:assets" \
+            --add-data "assets/icons:assets/icons" \
             soundboard.py
 
       - name: Finalize and sign app bundle
