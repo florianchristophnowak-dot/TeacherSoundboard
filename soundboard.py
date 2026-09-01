@@ -1996,7 +1996,7 @@ class SoundboardWindow(QMainWindow):
     def clear_phase_timer(self) -> None:
         self.phase_timer.clear()
         self._timer_sound_fired = False
-        self.timer_player.stop()
+        self._release_timer_sound()
         self._module_tick.stop()
         self._refresh_views()
 
@@ -2018,7 +2018,15 @@ class SoundboardWindow(QMainWindow):
         path = (self.cfg.timer_sound_path or "").strip()
         return Path(path).name if path else ""
 
+    def _release_timer_sound(self) -> None:
+        """Stoppt die Wiedergabe und gibt insbesondere unter Windows die Audiodatei frei."""
+        self.timer_player.stop()
+        self.timer_player.setSource(QUrl())
+
     def play_timer_sound(self) -> bool:
+        # Die vorige Quelle zuerst lösen: Windows hält die Datei sonst nach stop()
+        # weiterhin geöffnet, auch wenn der nächste konfigurierte Pfad ungültig ist.
+        self._release_timer_sound()
         path = (self.cfg.timer_sound_path or "").strip()
         if not path:
             return False
@@ -2027,7 +2035,6 @@ class SoundboardWindow(QMainWindow):
             self.timer_sound_error = f"Datei nicht gefunden: {path}"
             return False
         self.timer_sound_error = ""
-        self.timer_player.stop()
         self.timer_player.setSource(QUrl.fromLocalFile(str(source)))
         self.timer_player.play()
         return True
@@ -2054,7 +2061,7 @@ class SoundboardWindow(QMainWindow):
     def clear_timer_sound(self) -> None:
         self.cfg.timer_sound_path = ""
         self.timer_sound_error = ""
-        self.timer_player.stop()
+        self._release_timer_sound()
         self.save_config()
         if self.manager_dialog:
             self.manager_dialog.refresh()
@@ -2455,7 +2462,7 @@ class SoundboardWindow(QMainWindow):
         self._module_tick.stop()
         self.hotkey_manager.stop()
         self.player.stop()
-        self.timer_player.stop()
+        self._release_timer_sound()
         self.video_overlay.close()
         self.panel.close()
         if self._picker_popup:
@@ -2580,6 +2587,8 @@ def run_self_test(app: QApplication) -> int:
             if window.play_timer_sound() or not window.timer_sound_error:
                 raise RuntimeError("Missing timer sound was not reported")
             window.clear_timer_sound()
+            if not window.timer_player.source().isEmpty():
+                raise RuntimeError("Timer sound source was not released")
 
             window.start_phase_timer(5)
             window.phase_timer._paused_remaining = 0.0
