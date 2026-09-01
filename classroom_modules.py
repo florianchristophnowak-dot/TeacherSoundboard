@@ -86,8 +86,14 @@ def parse_visual_items(raw, defaults: Callable[[], list[VisualItem]]) -> list[Vi
     return parsed
 
 
+def format_duration(seconds: float) -> str:
+    """Restzeit als m:ss - die Sekunden zeigen auf einen Blick, dass es läuft."""
+    total = int(math.ceil(max(0.0, seconds) - 1e-9))
+    return f"{total // 60}:{total % 60:02d}"
+
+
 class PhaseTimer:
-    """Drift-resistant phase timer whose public display is minute-only."""
+    """Driftfester Phasentimer."""
 
     def __init__(self, clock: Callable[[], float] | None = None):
         self._clock = clock or time.monotonic
@@ -141,19 +147,32 @@ class PhaseTimer:
         self.paused = False
 
     def add_minutes(self, minutes: int | float) -> None:
-        seconds = max(0.0, float(minutes) * 60.0)
-        if seconds <= 0:
+        """Verlängert oder verkürzt die laufende Zeit um die angegebenen Minuten."""
+        seconds = float(minutes) * 60.0
+        if seconds == 0:
             return
         if self.total_seconds <= 0:
-            self.start(minutes)
+            if seconds > 0:
+                self.start(minutes)
             return
-        self.total_seconds += seconds
-        if self.running:
-            self._deadline += seconds
+
+        was_running = self.running
+        remaining = max(0.0, self.remaining_seconds() + seconds)
+        self.total_seconds = max(remaining, self.total_seconds + seconds)
+        if remaining <= 0:
+            self.running = False
+            self.paused = False
+            self._paused_remaining = 0.0
+            self._deadline = self._clock()
+            return
+
+        self._paused_remaining = remaining
+        if was_running:
+            self._deadline = self._clock() + remaining
+            self.running = True
+            self.paused = False
         else:
-            self._paused_remaining += seconds
-            if self._paused_remaining > 0:
-                self.paused = True
+            self.paused = True
 
     def remaining_seconds(self) -> float:
         if self.running:
@@ -436,12 +455,27 @@ def paint_action_icon(p: QPainter, rect: QRectF, action: str, color: QColor = QC
         p.drawRoundedRect(QRectF(cx - s*0.20, cy - s*0.24, s*0.13, s*0.48), 2, 2)
         p.drawRoundedRect(QRectF(cx + s*0.07, cy - s*0.24, s*0.13, s*0.48), 2, 2)
     elif action == "reset":
-        p.drawArc(QRectF(cx - s*0.25, cy - s*0.25, s*0.50, s*0.50), 30*16, 290*16)
-        p.drawLine(int(cx - s*0.26), int(cy - s*0.02), int(cx - s*0.30), int(cy - s*0.21))
-        p.drawLine(int(cx - s*0.26), int(cy - s*0.02), int(cx - s*0.08), int(cy - s*0.08))
+        radius = s * 0.25
+        p.drawArc(QRectF(cx - radius, cy - radius, radius*2, radius*2), 60*16, 280*16)
+        # Pfeilspitze am Ende des Bogens, tangential in Laufrichtung.
+        angle = math.radians(340)
+        px_, py_ = cx + radius*math.cos(angle), cy - radius*math.sin(angle)
+        dx, dy = -math.sin(angle), -math.cos(angle)
+        tip = QPointF(px_ + dx*s*0.17, py_ + dy*s*0.17)
+        head = QPainterPath()
+        head.moveTo(tip)
+        head.lineTo(px_ - dy*s*0.11, py_ + dx*s*0.11)
+        head.lineTo(px_ + dy*s*0.11, py_ - dx*s*0.11)
+        head.closeSubpath()
+        p.setBrush(QBrush(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPath(head)
+        p.setBrush(Qt.BrushStyle.NoBrush)
     elif action == "plus":
         p.drawLine(int(cx - s*0.22), int(cy), int(cx + s*0.22), int(cy))
         p.drawLine(int(cx), int(cy - s*0.22), int(cx), int(cy + s*0.22))
+    elif action == "minus":
+        p.drawLine(int(cx - s*0.22), int(cy), int(cx + s*0.22), int(cy))
     elif action == "menu":
         p.setBrush(QBrush(color))
         p.setPen(Qt.PenStyle.NoPen)
@@ -460,39 +494,70 @@ def render_action_icon(action: str, size: int = 42, color: QColor = QColor("#293
     return pixmap
 
 
-def paint_timer_dial(
+TIMER_IDLE = QColor("#8b96a4")
+TIMER_PAUSED = QColor("#eda34d")
+TIMER_DONE = QColor("#df5d67")
+
+
+def timer_arc_color(progress: float) -> QColor:
+    if progress > 0.20:
+        return QColor("#63c6a0")
+    return QColor("#eda34d") if progress > 0 else QColor("#df5d67")
+
+
+def paint_timer_ring(
     p: QPainter,
     rect: QRectF,
-    value: int,
+    text: str,
     progress: float,
-    remaining: bool,
+    state: str,
 ) -> None:
-    inset = rect.width() * 0.10
+    """Restzeit als Ring mit m:ss. state: running | paused | idle."""
+    inset = rect.width() * 0.05
     inner = rect.adjusted(inset, inset, -inset, -inset)
-    track = QColor(255, 255, 255, 75)
-    active = QColor("#63c6a0") if progress > 0.2 else QColor("#eda34d") if progress > 0 else QColor("#df5d67")
-    p.setBrush(QBrush(QColor(24, 28, 34, 218)))
-    p.setPen(QPen(QColor(255, 255, 255, 60), max(1.0, rect.width()*0.025)))
+    p.setBrush(QBrush(QColor(24, 28, 34, 225)))
+    p.setPen(QPen(QColor(255, 255, 255, 55), max(1.0, rect.width() * 0.02)))
     p.drawEllipse(inner)
-    ring = inner.adjusted(rect.width()*0.07, rect.height()*0.07, -rect.width()*0.07, -rect.height()*0.07)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(track, max(2.0, rect.width()*0.055), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawArc(ring, 90*16, -360*16)
-    p.setPen(QPen(active if remaining else QColor("#d7dde5"), max(2.0, rect.width()*0.055), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    arc = max(0, min(360*16, int(360*16*(progress if remaining else 1.0))))
-    p.drawArc(ring, 90*16, -arc)
 
+    stroke = max(3.0, rect.width() * 0.075)
+    ring = inner.adjusted(stroke, stroke, -stroke, -stroke)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(255, 255, 255, 60), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+    p.drawArc(ring, 90 * 16, -360 * 16)
+
+    if state == "idle":
+        color, sweep = TIMER_IDLE, 360 * 16
+    elif state == "done":
+        # Abgelaufen: voller roter Ring, damit es quer durch den Raum auffällt.
+        color, sweep = TIMER_DONE, 360 * 16
+    else:
+        color = TIMER_PAUSED if state == "paused" else timer_arc_color(progress)
+        sweep = max(0, min(360 * 16, int(360 * 16 * progress)))
+    p.setPen(QPen(color, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawArc(ring, 90 * 16, -sweep)
+
+    # Schriftgröße so wählen, dass auch "12:34" in den Ring passt.
     font = QFont()
     font.setBold(True)
-    font.setPixelSize(max(12, int(rect.width()*0.30)))
+    size = max(10, int(rect.width() * 0.30))
+    limit = ring.width() * 0.86
+    while size > 9:
+        font.setPixelSize(size)
+        if QFontMetrics(font).horizontalAdvance(text) <= limit:
+            break
+        size -= 1
     p.setFont(font)
-    p.setPen(QColor("#ffffff"))
-    p.drawText(inner, Qt.AlignmentFlag.AlignCenter, str(max(0, int(value))))
+    p.setPen(QColor("#ffffff") if state == "running" else color.lighter(125))
+    p.drawText(inner, int(Qt.AlignmentFlag.AlignCenter), text)
 
 
 # ---------------- Unterrichtspanel am rechten Bildschirmrand ----------------
 PANEL_MIN_UNIT = 36
 PANEL_MAX_UNIT = 96
+PANEL_HEADING_PHASE = "SOZIALFORM"
+PANEL_HEADING_MATERIAL = "MATERIAL"
+PANEL_HEADING_TIMER = "ZEIT"
+PANEL_MATERIAL_COLUMNS = 2
 
 
 def panel_name_font(base: QFont, unit: int) -> QFont:
@@ -508,19 +573,17 @@ def panel_heading_font(base: QFont, unit: int) -> QFont:
     font.setBold(True)
     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
     return font
-PANEL_HEADING_PHASE = "SOZIALFORM"
-PANEL_HEADING_MATERIAL = "MATERIAL"
-PANEL_HEADING_TIMER = "ZEIT"
 
 
 @dataclass
 class PanelRegion:
-    """Ein anklickbarer Abschnitt des Panels."""
+    """Ein anklickbarer Bereich des Panels."""
 
-    kind: str                                    # "phase" | "material" | "timer"
+    kind: str                                    # phase | material | timer | timer-*
     rect: QRectF                                 # Klickfläche
-    tile: QRectF                                 # Zeichenfläche für Symbol oder Zifferblatt
+    tile: QRectF                                 # Zeichenfläche für Symbol, Ring oder Taste
     item: VisualItem | None = None
+    action: str = ""                             # Symbol der Schaltflächen
     label: str = ""
     label_rect: QRectF = field(default_factory=QRectF)
 
@@ -533,6 +596,7 @@ class PanelLayout:
     grip: QRectF
     regions: list[PanelRegion] = field(default_factory=list)
     headings: list[tuple[QRectF, str]] = field(default_factory=list)
+    dividers: list[QRectF] = field(default_factory=list)
 
     def region_at(self, point: QPointF) -> PanelRegion | None:
         for region in self.regions:
@@ -548,22 +612,30 @@ def build_panel_layout(
     show_timer: bool,
     phase_item: VisualItem | None,
     material_items: list[VisualItem],
-    show_labels: bool = True,
-    timer_minutes: int = 0,
+    show_labels: bool = False,
     timer_total: int = 0,
     measure: Callable[[str], int] | None = None,
 ) -> PanelLayout:
-    """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar."""
+    """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar.
+
+    Ohne Beschriftung liegt das Material zweispaltig und die Abschnitte werden
+    durch Linien statt durch Überschriften getrennt.
+    """
     unit = max(PANEL_MIN_UNIT, int(unit))
     pad = round(unit * 0.30)
     gap = round(unit * 0.30)
     row_gap = round(unit * 0.16)
     big = round(unit * 1.50)
     small = unit
+    dial = round(unit * 1.90)
+    button = round(unit * 0.62)
+    toggle = round(unit * 0.86)          # Start/Pause ist das Hauptbedienelement
+    button_gap = round(unit * 0.16)
+    grip_height = round(unit * 0.26)
     heading_height = round(unit * 0.42) if show_labels else 0
     name_height = round(unit * 0.48) if show_labels else 0
-    dial = round(unit * 1.60)
-    grip_height = round(unit * 0.26)
+    divider_height = 0 if show_labels else round(unit * 0.34)
+    columns = 1 if show_labels else PANEL_MATERIAL_COLUMNS
 
     phase_display = phase_item or VisualItem(
         "phase-placeholder", "Sozialform wählen", "phase-placeholder"
@@ -572,21 +644,29 @@ def build_panel_layout(
         VisualItem("material-placeholder", "Material wählen", "material-placeholder")
     ]
 
-    # Die Namensspalte wird an der tatsächlichen Textbreite ausgerichtet: eigene
-    # Bezeichnungen und die Systemschrift unterscheiden sich je nach Rechner.
-    text_width = round(unit * 2.50)
-    if show_labels and measure is not None:
-        needed = [measure(item.name) for item in material_display] if show_materials else []
-        if show_phase:
-            # Der Name der Sozialform steht über der vollen Breite, nicht nur über der Spalte.
-            needed.append(measure(phase_display.name) - (small + row_gap))
-        if needed:
-            text_width = int(max(
-                round(unit * 1.60),
-                min(round(unit * 3.60), max(needed) + round(unit * 0.20)),
-            ))
+    button_row = 2 * button + toggle + 2 * button_gap
+    if show_labels:
+        # Die Namensspalte wird an der tatsächlichen Textbreite ausgerichtet:
+        # eigene Bezeichnungen und Systemschriften unterscheiden sich.
+        text_width = round(unit * 2.50)
+        if measure is not None:
+            needed = [measure(item.name) for item in material_display] if show_materials else []
+            if show_phase:
+                needed.append(measure(phase_display.name) - (small + row_gap))
+            if needed:
+                text_width = int(max(
+                    round(unit * 1.60),
+                    min(round(unit * 3.60), max(needed) + round(unit * 0.20)),
+                ))
+        content_width = small + row_gap + text_width
+    else:
+        content_width = max(
+            big,
+            columns * small + (columns - 1) * row_gap,
+            dial,
+            button_row if show_timer else 0,
+        )
 
-    content_width = (small + row_gap + text_width) if show_labels else big
     width = pad * 2 + content_width
     left = float(pad)
 
@@ -597,55 +677,79 @@ def build_panel_layout(
     )
 
     y = float(pad + grip_height)
+    first_section = True
 
-    def add_heading(text: str) -> None:
-        nonlocal y
-        if not show_labels:
-            return
-        layout.headings.append((QRectF(left, y, content_width, heading_height), text))
-        y += heading_height
+    def open_section(heading: str) -> None:
+        nonlocal y, first_section
+        if not first_section:
+            if show_labels:
+                y += gap
+            else:
+                layout.dividers.append(
+                    QRectF(left + content_width * 0.12, y + divider_height / 2.0,
+                           content_width * 0.76, 1.0)
+                )
+                y += divider_height
+        first_section = False
+        if show_labels:
+            layout.headings.append((QRectF(left, y, content_width, heading_height), heading))
+            y += heading_height
 
     if show_phase:
-        add_heading(PANEL_HEADING_PHASE)
-        item = phase_display
+        open_section(PANEL_HEADING_PHASE)
         tile = QRectF(left + (content_width - big) / 2.0, y, big, big)
-        label_rect = QRectF(left, y + big, content_width, name_height)
         layout.regions.append(PanelRegion(
             "phase", QRectF(left, y, content_width, big + name_height), tile,
-            item, item.name if show_labels else "", label_rect,
+            phase_display, "", phase_display.name if show_labels else "",
+            QRectF(left, y + big, content_width, name_height),
         ))
-        y += big + name_height + gap
+        y += big + name_height
 
     if show_materials:
-        add_heading(PANEL_HEADING_MATERIAL)
-        for index, item in enumerate(material_display):
-            if index:
-                y += row_gap
-            tile = QRectF(left, y, small, small)
-            label_rect = QRectF(left + small + row_gap, y, text_width, small)
-            layout.regions.append(PanelRegion(
-                "material", QRectF(left, y, content_width, small), tile,
-                item, item.name if show_labels else "", label_rect,
-            ))
+        open_section(PANEL_HEADING_MATERIAL)
+        for index in range(0, len(material_display), columns):
+            row_items = material_display[index:index + columns]
+            row_width = len(row_items) * small + (len(row_items) - 1) * row_gap
+            x = left + (content_width - row_width) / 2.0 if columns > 1 else left
+            for item in row_items:
+                tile = QRectF(x, y, small, small)
+                if show_labels:
+                    click = QRectF(left, y, content_width, small)
+                    label_rect = QRectF(left + small + row_gap, y, content_width - small - row_gap, small)
+                else:
+                    click = tile
+                    label_rect = QRectF()
+                layout.regions.append(PanelRegion(
+                    "material", click, tile, item, "",
+                    item.name if show_labels else "", label_rect,
+                ))
+                x += small + row_gap
             y += small
-        y += gap
+            if index + columns < len(material_display):
+                y += row_gap
 
     if show_timer:
-        add_heading(PANEL_HEADING_TIMER)
-        tile = QRectF(left + (content_width - dial) / 2.0, y, dial, dial)
-        if timer_total > 0:
-            caption = f"von {timer_total} min"
-        else:
-            caption = "Zeit einstellen"
-        label_rect = QRectF(left, y + dial, content_width, name_height)
-        layout.regions.append(PanelRegion(
-            "timer", QRectF(left, y, content_width, dial + name_height), tile,
-            None, caption if show_labels else "", label_rect,
-        ))
-        y += dial + name_height + gap
+        open_section(PANEL_HEADING_TIMER)
+        ring = QRectF(left + (content_width - dial) / 2.0, y, dial, dial)
+        layout.regions.append(PanelRegion("timer", QRectF(ring), ring))
+        y += dial + row_gap
 
-    if layout.regions:
-        y -= gap
+        x = left + (content_width - button_row) / 2.0
+        for kind, action, size in (
+            ("timer-minus", "minus", button),
+            ("timer-toggle", "play", toggle),
+            ("timer-plus", "plus", button),
+        ):
+            tile = QRectF(x, y + (toggle - size) / 2.0, size, size)
+            layout.regions.append(PanelRegion(kind, QRectF(tile), tile, None, action))
+            x += size + button_gap
+        y += toggle
+
+        if show_labels:
+            caption = f"von {timer_total} min" if timer_total > 0 else "Zeit einstellen"
+            layout.headings.append((QRectF(left, y, content_width, name_height), caption))
+            y += name_height
+
     layout.height = int(round(y + pad))
     return layout
 
@@ -655,6 +759,7 @@ class ClassroomPanel(QWidget):
 
     Zeigt Sozialform, Material und Timer groß genug, um bis in die letzte Reihe
     lesbar zu sein. Jeder der drei Abschnitte lässt sich einzeln zuschalten.
+    Ohne Beschriftung bleibt es rein bildlich, wie für die Klasse vorgesehen.
     """
 
     def __init__(self, host):
@@ -707,7 +812,6 @@ class ClassroomPanel(QWidget):
                 self.host.selected_phase_item(),
                 self.host.selected_material_items(),
                 show_labels=cfg.panel_show_labels,
-                timer_minutes=timer.remaining_minutes(),
                 timer_total=timer.total_minutes(),
                 measure=QFontMetrics(panel_name_font(self.font(), unit)).horizontalAdvance,
             )
@@ -740,6 +844,14 @@ class ClassroomPanel(QWidget):
         self.host.save_config()
 
     # ---- Zeichnen
+    def timer_state(self) -> str:
+        timer = self.host.phase_timer
+        if not timer.has_value():
+            return "idle"
+        if timer.remaining_seconds() <= 0:
+            return "done"
+        return "running" if timer.running else "paused"
+
     def paintEvent(self, event):
         if self.layout_data is None:
             return
@@ -755,38 +867,38 @@ class ClassroomPanel(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 46), 1.4))
         painter.drawRoundedRect(card, radius, radius)
 
-        painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
         grip = self.layout_data.grip
         painter.drawRoundedRect(grip, grip.height() / 2.0, grip.height() / 2.0)
 
-        heading_font = panel_heading_font(self.font(), self.layout_data.unit)
-        name_font = panel_name_font(self.font(), self.layout_data.unit)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
+        for divider in self.layout_data.dividers:
+            painter.drawRect(divider)
 
-        painter.setFont(heading_font)
+        painter.setFont(panel_heading_font(self.font(), self.layout_data.unit))
         painter.setPen(QColor("#8d9aab"))
         for rect, text in self.layout_data.headings:
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
+            alignment = (
+                Qt.AlignmentFlag.AlignHCenter if text.startswith(("von ", "Zeit"))
+                else Qt.AlignmentFlag.AlignLeft
+            )
+            painter.drawText(rect, int(alignment | Qt.AlignmentFlag.AlignVCenter), text)
 
+        state = self.timer_state()
         timer = self.host.phase_timer
+        name_font = panel_name_font(self.font(), self.layout_data.unit)
         for region in self.layout_data.regions:
-            if self._hovered == self._region_key(region):
-                painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
-                painter.setPen(Qt.PenStyle.NoPen)
-                inset = self.layout_data.unit * 0.10
-                painter.drawRoundedRect(
-                    region.rect.adjusted(-inset, -inset * 0.5, inset, inset * 0.5),
-                    inset, inset,
-                )
+            self._paint_hover(painter, region)
 
             if region.kind == "timer":
-                has_value = timer.has_value()
-                paint_timer_dial(
-                    painter, region.tile,
-                    timer.remaining_minutes() if has_value else self.host.cfg.timer_default_minutes,
-                    timer.progress(),
-                    remaining=has_value,
+                text = (
+                    format_duration(timer.remaining_seconds()) if state != "idle"
+                    else format_duration(self.host.cfg.timer_default_minutes * 60)
                 )
+                paint_timer_ring(painter, region.tile, text, timer.progress(), state)
+            elif region.kind.startswith("timer-"):
+                self._paint_button(painter, region, state)
             elif region.item is not None:
                 paint_visual_item(painter, region.tile, region.item)
 
@@ -806,6 +918,33 @@ class ClassroomPanel(QWidget):
             painter.drawText(region.label_rect, int(alignment | Qt.AlignmentFlag.AlignVCenter), text)
 
         painter.end()
+
+    def _paint_hover(self, painter: QPainter, region: PanelRegion) -> None:
+        if self._hovered != self._region_key(region):
+            return
+        inset = self.layout_data.unit * 0.10
+        painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(
+            region.rect.adjusted(-inset, -inset * 0.5, inset, inset * 0.5), inset, inset
+        )
+
+    def _paint_button(self, painter: QPainter, region: PanelRegion, state: str) -> None:
+        action = region.action
+        if region.kind == "timer-toggle":
+            action = "pause" if state == "running" else "play"
+        if region.kind == "timer-toggle":
+            painter.setBrush(QBrush(QColor(76, 87, 102, 245)))
+            painter.setPen(QPen(QColor(255, 255, 255, 80), 1.4))
+        else:
+            painter.setBrush(QBrush(QColor(52, 60, 71, 235)))
+            painter.setPen(QPen(QColor(255, 255, 255, 45), 1.2))
+        radius = region.tile.width() * 0.28
+        painter.drawRoundedRect(region.tile, radius, radius)
+        inset = region.tile.width() * 0.24
+        paint_action_icon(
+            painter, region.tile.adjusted(inset, inset, -inset, -inset), action, QColor("#ffffff")
+        )
 
     @staticmethod
     def _region_key(region: PanelRegion) -> str:
@@ -835,6 +974,12 @@ class ClassroomPanel(QWidget):
             self.host.open_material_picker(global_pos)
         elif region.kind == "timer":
             self.host.open_timer_controls(global_pos)
+        elif region.kind == "timer-toggle":
+            self.host.toggle_phase_timer()
+        elif region.kind == "timer-minus":
+            self.host.adjust_phase_timer(-1)
+        elif region.kind == "timer-plus":
+            self.host.adjust_phase_timer(1)
         event.accept()
 
     def mouseMoveEvent(self, event):
@@ -936,10 +1081,10 @@ class IconPickerPopup(QDialog):
 
 
 class TimerControlPopup(QDialog):
+    """Auswahl der Dauer. Pause, Neustart und Minuten liegen im Panel selbst."""
+
     startRequested = pyqtSignal(int)
-    pauseRequested = pyqtSignal()
     resetRequested = pyqtSignal()
-    addMinuteRequested = pyqtSignal()
     clearRequested = pyqtSignal()
 
     def __init__(self, presets: list[int], current_minutes: int, is_running: bool, parent=None):
@@ -947,56 +1092,57 @@ class TimerControlPopup(QDialog):
         self.setStyleSheet(
             "QDialog { background: #20252b; border: 1px solid #59616b; border-radius: 8px; }"
             "QPushButton, QToolButton, QSpinBox { background: #353c44; color: white; border: 0; "
-            "border-radius: 6px; padding: 7px; font-weight: 700; }"
+            "border-radius: 8px; padding: 7px; font-size: 17px; font-weight: 700; }"
+            "QPushButton:hover, QToolButton:hover { background: #46505c; }"
+            "QSpinBox::up-button, QSpinBox::down-button { width: 20px; background: #46505c; }"
         )
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
 
         durations = QHBoxLayout()
+        durations.setSpacing(6)
         for minutes in presets:
             button = QPushButton(str(minutes))
             button.setToolTip(f"{minutes} Minuten starten")
-            button.setFixedSize(44, 40)
+            button.setFixedSize(54, 48)
             button.clicked.connect(lambda checked=False, value=minutes: self._start(value))
             durations.addWidget(button)
-        self.custom_minutes = QSpinBox()
-        self.custom_minutes.setRange(1, 999)
-        self.custom_minutes.setValue(max(1, current_minutes or presets[0] if presets else 5))
-        self.custom_minutes.setToolTip("Eigene Minutenzahl")
-        self.custom_minutes.setFixedSize(64, 40)
-        durations.addWidget(self.custom_minutes)
-        play = self._action_button("play", "Timer starten")
-        play.clicked.connect(lambda: self._start(self.custom_minutes.value()))
-        durations.addWidget(play)
         root.addLayout(durations)
 
-        controls = QHBoxLayout()
-        pause = self._action_button("pause" if is_running else "play", "Pause/Fortsetzen")
-        pause.clicked.connect(self._pause)
-        controls.addWidget(pause)
-        reset = self._action_button("reset", "Neu starten")
+        custom = QHBoxLayout()
+        custom.setSpacing(6)
+        self.custom_minutes = QSpinBox()
+        self.custom_minutes.setRange(1, 999)
+        self.custom_minutes.setValue(max(1, current_minutes or (presets[0] if presets else 5)))
+        self.custom_minutes.setToolTip("Eigene Minutenzahl")
+        self.custom_minutes.setFixedSize(78, 48)
+        custom.addWidget(self.custom_minutes)
+
+        play = self._action_button("play", "Mit dieser Dauer starten")
+        play.clicked.connect(lambda: self._start(self.custom_minutes.value()))
+        custom.addWidget(play)
+
+        reset = self._action_button("reset", "Von vorn beginnen")
+        reset.setEnabled(is_running)
         reset.clicked.connect(self._reset)
-        controls.addWidget(reset)
-        plus = self._action_button("plus", "Eine Minute hinzufügen")
-        plus.clicked.connect(self._add_minute)
-        controls.addWidget(plus)
-        clear_item = VisualItem("clear", "Timer löschen", "clear")
+        custom.addWidget(reset)
+
         clear = QToolButton()
-        clear.setIcon(QIcon(render_visual_item(clear_item, 42)))
-        clear.setIconSize(QSize(36, 36))
-        clear.setFixedSize(44, 40)
+        clear.setIcon(QIcon(render_visual_item(VisualItem("clear", "", "clear"), 48)))
+        clear.setIconSize(QSize(40, 40))
+        clear.setFixedSize(54, 48)
         clear.setToolTip("Timer löschen")
         clear.clicked.connect(self._clear)
-        controls.addWidget(clear)
-        root.addLayout(controls)
+        custom.addWidget(clear)
+        root.addLayout(custom)
 
     @staticmethod
     def _action_button(action: str, tooltip: str) -> QToolButton:
         button = QToolButton()
-        button.setIcon(QIcon(render_action_icon(action, 42, QColor("#ffffff"))))
-        button.setIconSize(QSize(34, 34))
-        button.setFixedSize(44, 40)
+        button.setIcon(QIcon(render_action_icon(action, 48, QColor("#ffffff"))))
+        button.setIconSize(QSize(38, 38))
+        button.setFixedSize(54, 48)
         button.setToolTip(tooltip)
         return button
 
@@ -1004,16 +1150,8 @@ class TimerControlPopup(QDialog):
         self.startRequested.emit(minutes)
         self.accept()
 
-    def _pause(self) -> None:
-        self.pauseRequested.emit()
-        self.accept()
-
     def _reset(self) -> None:
         self.resetRequested.emit()
-        self.accept()
-
-    def _add_minute(self) -> None:
-        self.addMinuteRequested.emit()
         self.accept()
 
     def _clear(self) -> None:

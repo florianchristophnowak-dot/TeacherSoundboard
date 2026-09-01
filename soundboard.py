@@ -178,7 +178,7 @@ class AppConfig:
     timer_presets: list[int] = field(default_factory=lambda: [5, 8, 10])
     timer_default_minutes: int = 5
     panel_y_ratio: float = 0.08   # senkrechte Lage des Panels am rechten Rand
-    panel_show_labels: bool = True
+    panel_show_labels: bool = False   # ausdrücklich gewünscht: rein bildlich
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -294,7 +294,7 @@ def parse_config(data) -> AppConfig:
         timer_presets=presets,
         timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
         panel_y_ratio=_bounded_float(data.get("panel_y_ratio"), 0.08, 0.0, 1.0),
-        panel_show_labels=config_bool("panel_show_labels", True),
+        panel_show_labels=config_bool("panel_show_labels", False),
     )
 
 
@@ -1884,9 +1884,7 @@ class SoundboardWindow(QMainWindow):
             parent=self,
         )
         popup.startRequested.connect(self.start_phase_timer)
-        popup.pauseRequested.connect(self.toggle_phase_timer)
         popup.resetRequested.connect(self.reset_phase_timer)
-        popup.addMinuteRequested.connect(lambda: self.add_phase_minutes(1))
         popup.clearRequested.connect(self.clear_phase_timer)
         self._timer_popup = popup
         self._position_popup(popup, global_pos)
@@ -1915,6 +1913,18 @@ class SoundboardWindow(QMainWindow):
             return
         self.phase_timer.reset()
         self._module_tick.start()
+        self._refresh_views()
+
+    def adjust_phase_timer(self, delta: int) -> None:
+        """Ändert die laufende Zeit oder, ohne laufenden Timer, die Startdauer."""
+        if self.phase_timer.has_value():
+            self.phase_timer.add_minutes(delta)
+            if self.phase_timer.running:
+                self._module_tick.start()
+        else:
+            minutes = _bounded_int(self.cfg.timer_default_minutes + delta, 5, 1, 999)
+            self.cfg.timer_default_minutes = minutes
+            self.save_config()
         self._refresh_views()
 
     def add_phase_minutes(self, minutes: int) -> None:
@@ -2419,8 +2429,13 @@ def run_self_test(app: QApplication) -> int:
             if panel_layout is None:
                 raise RuntimeError("Classroom panel was not laid out")
             panel_kinds = {region.kind for region in panel_layout.regions}
-            if panel_kinds != {"phase", "material", "timer"}:
+            expected_kinds = {
+                "phase", "material", "timer", "timer-minus", "timer-toggle", "timer-plus",
+            }
+            if panel_kinds != expected_kinds:
                 raise RuntimeError(f"Classroom modules missing from panel: {sorted(panel_kinds)}")
+            if any(region.label for region in panel_layout.regions):
+                raise RuntimeError("Panel shows labels although they are switched off")
             if not window.panel.isVisible():
                 raise RuntimeError("Classroom panel did not become visible")
             panel_preview = window.panel.grab()

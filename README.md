@@ -60,9 +60,15 @@ Alle vier Bestandteile sind einzeln zu- und abschaltbar, über das Kontextmenü 
 - Soundboard-Leiste: die Klangschaltflächen am gewählten Bildschirmrand
 - Methode oder Sozialform: Kachel anklicken und ein Symbol auswählen
 - Material: Kachel anklicken und beliebig viele Materialien aktivieren
-- Timer: `5`, `8` oder `10` Minuten wählen oder eine eigene Minutenzahl einstellen; der Ring färbt sich von Grün über Orange nach Rot
+- Timer: Restzeit als Ring mit Minuten und Sekunden, darunter drei Schaltflächen für eine Minute weniger, Start/Pause und eine Minute mehr
 
-Die Beschriftungen im Panel lassen sich abschalten, dann bleiben nur die Symbole. Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
+Das Panel zeigt ausschließlich Symbole und Ziffern, keine Bezeichnungen. Wer sie doch möchte, schaltet sie unter *Anzeige → Beschriftung im Panel* zu. Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
+
+### Timer
+
+Start, Pause und die Minutentasten liegen unmittelbar im Panel, es ist kein Umweg über ein Menü nötig. Ein Klick auf den Ring öffnet die Dauer-Auswahl mit `5`, `8`, `10` Minuten, einer eigenen Minutenzahl, Neustart und Löschen.
+
+Der Ring zeigt die Restzeit sekundengenau und färbt sich von Grün über Orange nach Rot; ist die Zeit abgelaufen, steht ein voller roter Ring auf `0:00`. Ohne eingestellten Timer zeigt er grau die Startdauer, die sich mit den Minutentasten verändern lässt. Bei Pause wechseln Ring und Ziffern nach Orange, die Schaltfläche zeigt wieder das Startdreieck.
 
 Die mitgelieferten Methoden-/Sozialform- und Materialkataloge lassen sich in der Verwaltung bearbeiten. Eigene Einträge können ergänzt, umbenannt, sortiert oder gelöscht werden. Für jeden Eintrag kann ein eigenes PNG-, JPG- oder SVG-Symbol gewählt werden. Importierte Bilder werden in den lokalen Einstellungsordner kopiert und bleiben daher auch erhalten, wenn die ursprüngliche Datei später verschoben wird.
 
