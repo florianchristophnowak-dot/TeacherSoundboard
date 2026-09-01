@@ -61,11 +61,17 @@ jobs:
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
+          $env:TEACHER_SOUNDBOARD_SELF_TEST_LOG = Join-Path $env:RUNNER_TEMP 'TeacherSoundboard-self-test.log'
           $process = Start-Process `
             -FilePath .\dist\TeacherSoundboard\TeacherSoundboard.exe `
             -ArgumentList '--self-test' `
             -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($process.ExitCode)" }
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $env:TEACHER_SOUNDBOARD_SELF_TEST_LOG) {
+              Get-Content $env:TEACHER_SOUNDBOARD_SELF_TEST_LOG
+            }
+            throw "Packaged self-test failed with exit code $($process.ExitCode)"
+          }
 
       - name: Package Windows downloads
         shell: pwsh

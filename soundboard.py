@@ -6,10 +6,12 @@ import os
 import math
 import platform
 import random
+import struct
 import sys
 import tempfile
 import threading
 import traceback
+import wave
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable
@@ -177,8 +179,9 @@ class AppConfig:
     selected_material_ids: list[str] = field(default_factory=list)
     timer_presets: list[int] = field(default_factory=lambda: [5, 8, 10])
     timer_default_minutes: int = 5
+    timer_sound_path: str = ""   # Klang, wenn die Zeit abgelaufen ist
     panel_y_ratio: float = 0.08   # senkrechte Lage des Panels am rechten Rand
-    panel_show_labels: bool = True
+    panel_show_labels: bool = False   # ausdrücklich gewünscht: rein bildlich
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -293,8 +296,9 @@ def parse_config(data) -> AppConfig:
         selected_material_ids=selected_material_ids,
         timer_presets=presets,
         timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
+        timer_sound_path=str(data.get("timer_sound_path") or ""),
         panel_y_ratio=_bounded_float(data.get("panel_y_ratio"), 0.08, 0.0, 1.0),
-        panel_show_labels=config_bool("panel_show_labels", True),
+        panel_show_labels=config_bool("panel_show_labels", False),
     )
 
 
@@ -940,7 +944,9 @@ class ManageDialog(QDialog):
 
         # ---- Integrated classroom modules ----
         classroom_group = QGroupBox("Optionale Unterrichtsmodule (Panel am rechten Rand)")
-        classroom_layout = QHBoxLayout(classroom_group)
+        classroom_box = QVBoxLayout(classroom_group)
+        classroom_layout = QHBoxLayout()
+        classroom_box.addLayout(classroom_layout)
         self.module_checks: dict[str, QCheckBox] = {}
         for key, label in [
             ("soundboard", "Soundboard-Leiste"),
@@ -970,6 +976,22 @@ class ManageDialog(QDialog):
         material_catalog.clicked.connect(lambda: self.host.open_catalog_editor("materials"))
         classroom_layout.addWidget(material_catalog)
         classroom_layout.addStretch(1)
+
+        sound_row = QHBoxLayout()
+        sound_row.addWidget(QLabel("Klang am Ende des Timers:"))
+        self.timer_sound_label = QLabel()
+        self.timer_sound_label.setMinimumWidth(220)
+        sound_row.addWidget(self.timer_sound_label, 1)
+        choose_sound = QPushButton("Audiodatei wählen…")
+        choose_sound.clicked.connect(self.host.assign_timer_sound)
+        sound_row.addWidget(choose_sound)
+        self.test_sound_button = QPushButton("Anhören")
+        self.test_sound_button.clicked.connect(self.host.play_timer_sound)
+        sound_row.addWidget(self.test_sound_button)
+        self.clear_sound_button = QPushButton("Entfernen")
+        self.clear_sound_button.clicked.connect(self.host.clear_timer_sound)
+        sound_row.addWidget(self.clear_sound_button)
+        classroom_box.addLayout(sound_row)
         root.addWidget(classroom_group)
 
         line2 = QFrame()
@@ -1122,6 +1144,20 @@ class ManageDialog(QDialog):
         self.panel_labels_check.blockSignals(True)
         self.panel_labels_check.setChecked(self.host.cfg.panel_show_labels)
         self.panel_labels_check.blockSignals(False)
+
+        sound_name = self.host.timer_sound_name()
+        error = self.host.timer_sound_error
+        if error:
+            self.timer_sound_label.setText(error)
+            self.timer_sound_label.setStyleSheet("color: #9a4d00; font-weight: 600;")
+        elif sound_name:
+            self.timer_sound_label.setText(sound_name)
+            self.timer_sound_label.setStyleSheet("color: #176b35; font-weight: 600;")
+        else:
+            self.timer_sound_label.setText("kein Klang – der Ring wird nur rot")
+            self.timer_sound_label.setStyleSheet("color: #666;")
+        self.test_sound_button.setEnabled(bool(sound_name))
+        self.clear_sound_button.setEnabled(bool(sound_name))
 
         # Global hotkeys
         self.global_hotkeys_check.blockSignals(True)
@@ -1302,6 +1338,16 @@ class SoundboardWindow(QMainWindow):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
+
+        # Eigener Player, damit der Timerklang eine laufende Wiedergabe nicht
+        # abbricht und umgekehrt nicht von ihr abgeschnitten wird.
+        self.timer_player = QMediaPlayer(self)
+        self.timer_audio = QAudioOutput(self)
+        self.timer_player.setAudioOutput(self.timer_audio)
+        self.timer_player.errorOccurred.connect(self._on_timer_sound_error)
+        self.timer_sound_error = ""
+        self._timer_sound_fired = False
+
         self.media_devices = QMediaDevices(self)
         self.media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
 
@@ -1459,23 +1505,26 @@ class SoundboardWindow(QMainWindow):
         except Exception:
             return []
 
-    def apply_audio_device(self):
-        try:
-            wanted_id = (self.cfg.audio_device_id or "").strip()
-            wanted_description = (self.cfg.audio_device or "").strip()
-            if not wanted_id and not wanted_description:
-                self.audio.setDevice(QMediaDevices.defaultAudioOutput())
-                return
+    def _selected_audio_device(self):
+        """Eingestelltes Ausgabegerät, sonst das Standardgerät des Systems."""
+        wanted_id = (self.cfg.audio_device_id or "").strip()
+        wanted_description = (self.cfg.audio_device or "").strip()
+        if wanted_id or wanted_description:
             for device in QMediaDevices.audioOutputs():
                 device_id = self._audio_device_id(device)
                 if (wanted_id and device_id == wanted_id) or (
                     not wanted_id and wanted_description and device.description() == wanted_description
                 ):
-                    self.audio.setDevice(device)
                     self.cfg.audio_device_id = device_id
                     self.cfg.audio_device = device.description()
-                    return
-            self.audio.setDevice(QMediaDevices.defaultAudioOutput())
+                    return device
+        return QMediaDevices.defaultAudioOutput()
+
+    def apply_audio_device(self):
+        try:
+            device = self._selected_audio_device()
+            self.audio.setDevice(device)
+            self.timer_audio.setDevice(device)
         except Exception:
             pass
 
@@ -1571,6 +1620,7 @@ class SoundboardWindow(QMainWindow):
             "selected_material_ids": list(self.cfg.selected_material_ids),
             "timer_presets": list(self.cfg.timer_presets),
             "timer_default_minutes": self.cfg.timer_default_minutes,
+            "timer_sound_path": self.cfg.timer_sound_path,
             "panel_y_ratio": self.cfg.panel_y_ratio,
             "panel_show_labels": self.cfg.panel_show_labels,
         }
@@ -1597,11 +1647,12 @@ class SoundboardWindow(QMainWindow):
 
     # ---- Volume
     def apply_volume_to_audio(self):
-        try:
-            self.audio.setMuted(False)
-        except Exception:
-            pass
-        self.audio.setVolume(float(self.cfg.volume))
+        for output in (self.audio, self.timer_audio):
+            try:
+                output.setMuted(False)
+            except Exception:
+                pass
+            output.setVolume(float(self.cfg.volume))
 
     def set_volume(self, vol: float):
         self.cfg.volume = max(0.0, min(1.0, float(vol)))
@@ -1884,10 +1935,9 @@ class SoundboardWindow(QMainWindow):
             parent=self,
         )
         popup.startRequested.connect(self.start_phase_timer)
-        popup.pauseRequested.connect(self.toggle_phase_timer)
         popup.resetRequested.connect(self.reset_phase_timer)
-        popup.addMinuteRequested.connect(lambda: self.add_phase_minutes(1))
         popup.clearRequested.connect(self.clear_phase_timer)
+        popup.soundRequested.connect(self.assign_timer_sound)
         self._timer_popup = popup
         self._position_popup(popup, global_pos)
         popup.show()
@@ -1897,12 +1947,17 @@ class SoundboardWindow(QMainWindow):
         self.cfg.timer_default_minutes = minutes
         self.save_config()
         self.phase_timer.start(minutes)
+        self._timer_sound_fired = False
         self._module_tick.start()
         self._refresh_views()
 
     def toggle_phase_timer(self) -> None:
         if not self.phase_timer.has_value():
             self.start_phase_timer(self.cfg.timer_default_minutes)
+            return
+        if self.phase_timer.remaining_seconds() <= 0:
+            # Abgelaufen: Pause umschalten würde nichts bewirken.
+            self.reset_phase_timer()
             return
         self.phase_timer.toggle_pause()
         if self.phase_timer.running:
@@ -1914,7 +1969,22 @@ class SoundboardWindow(QMainWindow):
             self.start_phase_timer(self.cfg.timer_default_minutes)
             return
         self.phase_timer.reset()
+        self._timer_sound_fired = False
         self._module_tick.start()
+        self._refresh_views()
+
+    def adjust_phase_timer(self, delta: int) -> None:
+        """Ändert die laufende Zeit oder, ohne laufenden Timer, die Startdauer."""
+        if self.phase_timer.has_value():
+            self.phase_timer.add_minutes(delta)
+            if self.phase_timer.remaining_seconds() > 0:
+                self._timer_sound_fired = False
+            if self.phase_timer.running:
+                self._module_tick.start()
+        else:
+            minutes = _bounded_int(self.cfg.timer_default_minutes + delta, 5, 1, 999)
+            self.cfg.timer_default_minutes = minutes
+            self.save_config()
         self._refresh_views()
 
     def add_phase_minutes(self, minutes: int) -> None:
@@ -1925,15 +1995,76 @@ class SoundboardWindow(QMainWindow):
 
     def clear_phase_timer(self) -> None:
         self.phase_timer.clear()
+        self._timer_sound_fired = False
+        self._release_timer_sound()
         self._module_tick.stop()
         self._refresh_views()
 
     def _on_module_tick(self) -> None:
-        self.phase_timer.remaining_seconds()
+        remaining = self.phase_timer.remaining_seconds()
+        if remaining > 0:
+            self._timer_sound_fired = False
+        elif self.phase_timer.has_value() and not self._timer_sound_fired:
+            # Genau einmal je abgelaufenem Timer, nicht bei jedem Takt.
+            self._timer_sound_fired = True
+            self.play_timer_sound()
         self.panel.update()
         if not self.phase_timer.running:
             self._module_tick.stop()
             self.panel.relayout()
+
+    # ---- Klang am Ende des Timers
+    def timer_sound_name(self) -> str:
+        path = (self.cfg.timer_sound_path or "").strip()
+        return Path(path).name if path else ""
+
+    def _release_timer_sound(self) -> None:
+        """Stoppt die Wiedergabe und gibt insbesondere unter Windows die Audiodatei frei."""
+        self.timer_player.stop()
+        self.timer_player.setSource(QUrl())
+
+    def play_timer_sound(self) -> bool:
+        # Die vorige Quelle zuerst lösen: Windows hält die Datei sonst nach stop()
+        # weiterhin geöffnet, auch wenn der nächste konfigurierte Pfad ungültig ist.
+        self._release_timer_sound()
+        path = (self.cfg.timer_sound_path or "").strip()
+        if not path:
+            return False
+        source = Path(path)
+        if not source.is_file():
+            self.timer_sound_error = f"Datei nicht gefunden: {path}"
+            return False
+        self.timer_sound_error = ""
+        self.timer_player.setSource(QUrl.fromLocalFile(str(source)))
+        self.timer_player.play()
+        return True
+
+    def _on_timer_sound_error(self, error, error_string: str = ""):
+        if error == QMediaPlayer.Error.NoError:
+            return
+        self.timer_sound_error = error_string or "Klang konnte nicht abgespielt werden."
+        print(f"Timer sound error: {self.timer_sound_error}", file=sys.stderr)
+
+    def assign_timer_sound(self) -> None:
+        filt = "Audio (*.mp3 *.wav *.ogg *.flac *.m4a *.aac)"
+        start = str(Path(self.cfg.timer_sound_path).parent) if self.cfg.timer_sound_path else str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Klang für das Timer-Ende wählen", start, filt)
+        if not path:
+            return
+        self.cfg.timer_sound_path = path
+        self.timer_sound_error = ""
+        self.save_config()
+        self.play_timer_sound()
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
+
+    def clear_timer_sound(self) -> None:
+        self.cfg.timer_sound_path = ""
+        self.timer_sound_error = ""
+        self._release_timer_sound()
+        self.save_config()
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
 
     def open_catalog_editor(self, catalog: str) -> None:
         if catalog == "phase":
@@ -2331,6 +2462,7 @@ class SoundboardWindow(QMainWindow):
         self._module_tick.stop()
         self.hotkey_manager.stop()
         self.player.stop()
+        self._release_timer_sound()
         self.video_overlay.close()
         self.panel.close()
         if self._picker_popup:
@@ -2419,13 +2551,51 @@ def run_self_test(app: QApplication) -> int:
             if panel_layout is None:
                 raise RuntimeError("Classroom panel was not laid out")
             panel_kinds = {region.kind for region in panel_layout.regions}
-            if panel_kinds != {"phase", "material", "timer"}:
+            expected_kinds = {
+                "phase", "material", "timer", "timer-minus", "timer-toggle", "timer-plus",
+            }
+            if panel_kinds != expected_kinds:
                 raise RuntimeError(f"Classroom modules missing from panel: {sorted(panel_kinds)}")
+            if any(region.label for region in panel_layout.regions):
+                raise RuntimeError("Panel shows labels although they are switched off")
             if not window.panel.isVisible():
                 raise RuntimeError("Classroom panel did not become visible")
             panel_preview = window.panel.grab()
             if panel_preview.isNull():
                 raise RuntimeError("Classroom panel did not render")
+
+            # Klang am Ende des Timers: Zuweisung, Auslösen und Neustart prüfen.
+            beep = Path(temp_dir) / "timer-end.wav"
+            with wave.open(str(beep), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(8000)
+                handle.writeframes(b"".join(
+                    struct.pack("<h", int(9000 * math.sin(index * 0.7)))
+                    for index in range(1200)
+                ))
+            window.cfg.timer_sound_path = str(beep)
+            window.phase_timer._paused_remaining = 0.0
+            window.phase_timer.running = False
+            window._timer_sound_fired = False
+            window._on_module_tick()
+            if not window._timer_sound_fired:
+                raise RuntimeError("Timer sound was not triggered when the time ran out")
+            if not window.play_timer_sound():
+                raise RuntimeError("Timer sound could not be started")
+            window.cfg.timer_sound_path = str(Path(temp_dir) / "missing.wav")
+            if window.play_timer_sound() or not window.timer_sound_error:
+                raise RuntimeError("Missing timer sound was not reported")
+            window.clear_timer_sound()
+            if not window.timer_player.source().isEmpty():
+                raise RuntimeError("Timer sound source was not released")
+
+            window.start_phase_timer(5)
+            window.phase_timer._paused_remaining = 0.0
+            window.phase_timer.running = False
+            window.toggle_phase_timer()
+            if window.phase_timer.remaining_minutes() != 5:
+                raise RuntimeError("An expired timer did not restart on play")
 
             window.audio.setVolume(0.5)
             media_player_available = window.player.isAvailable()
@@ -2452,7 +2622,14 @@ def run_self_test(app: QApplication) -> int:
         }))
         return 0
     except Exception:
-        traceback.print_exc()
+        details = traceback.format_exc()
+        print(details, file=sys.stderr)
+        diagnostic_path = os.environ.get("TEACHER_SOUNDBOARD_SELF_TEST_LOG")
+        if diagnostic_path:
+            try:
+                Path(diagnostic_path).write_text(details, encoding="utf-8")
+            except OSError:
+                pass
         return 1
     finally:
         if window is not None:

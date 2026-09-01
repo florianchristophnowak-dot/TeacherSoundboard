@@ -8,6 +8,7 @@ from PyQt6.QtCore import QPointF
 import soundboard
 from classroom_modules import (
     PhaseTimer, build_panel_layout, default_material_items, default_phase_items,
+    format_duration,
 )
 
 
@@ -158,49 +159,75 @@ class PanelLayoutTests(unittest.TestCase):
             show_timer=True,
             phase_item=default_phase_items()[2],
             material_items=default_material_items()[:3],
-            show_labels=True,
-            timer_minutes=7,
+            show_labels=False,
             timer_total=20,
         )
         options.update(overrides)
         return build_panel_layout(**options)
 
+    def kinds(self, layout):
+        return [region.kind for region in layout.regions]
+
     def test_each_module_contributes_its_own_regions(self):
         layout = self.layout()
-        kinds = [region.kind for region in layout.regions]
-        self.assertEqual(kinds, ["phase", "material", "material", "material", "timer"])
-        self.assertEqual([text for _rect, text in layout.headings],
-                         ["SOZIALFORM", "MATERIAL", "ZEIT"])
+        self.assertEqual(self.kinds(layout), [
+            "phase", "material", "material", "material",
+            "timer", "timer-minus", "timer-toggle", "timer-plus",
+        ])
+
+    def test_panel_stays_wordless_unless_labels_are_switched_on(self):
+        wordless = self.layout()
+        self.assertEqual([region.label for region in wordless.regions], [""] * 8)
+        self.assertEqual(wordless.headings, [])
+        # Ohne Überschriften trennen Linien die drei Abschnitte.
+        self.assertEqual(len(wordless.dividers), 2)
+
+        labelled = self.layout(show_labels=True)
+        self.assertEqual([text for _rect, text in labelled.headings],
+                         ["SOZIALFORM", "MATERIAL", "ZEIT", "von 20 min"])
+        self.assertEqual(labelled.dividers, [])
+        self.assertGreater(labelled.width, wordless.width)
 
     def test_modules_can_be_switched_off_individually(self):
         only_timer = self.layout(show_phase=False, show_materials=False)
-        self.assertEqual([region.kind for region in only_timer.regions], ["timer"])
+        self.assertEqual(self.kinds(only_timer),
+                         ["timer", "timer-minus", "timer-toggle", "timer-plus"])
 
         without_timer = self.layout(show_timer=False)
-        self.assertNotIn("timer", [region.kind for region in without_timer.regions])
+        self.assertEqual(self.kinds(without_timer), ["phase", "material", "material", "material"])
         self.assertLess(without_timer.height, self.layout().height)
 
         empty = self.layout(show_phase=False, show_materials=False, show_timer=False)
         self.assertEqual(empty.regions, [])
+        self.assertEqual(empty.dividers, [])
 
     def test_empty_selections_stay_clickable_as_placeholders(self):
         layout = self.layout(phase_item=None, material_items=[])
-        kinds = [region.kind for region in layout.regions]
-        self.assertEqual(kinds.count("phase"), 1)
-        self.assertEqual(kinds.count("material"), 1)
         icon_keys = [region.item.icon_key for region in layout.regions if region.item]
-        self.assertIn("phase-placeholder", icon_keys)
-        self.assertIn("material-placeholder", icon_keys)
+        self.assertEqual(icon_keys, ["phase-placeholder", "material-placeholder"])
 
-    def test_regions_do_not_overlap_and_stay_inside_the_panel(self):
+    def test_regions_neither_overlap_nor_leave_the_panel(self):
         layout = self.layout(material_items=default_material_items())
         for region in layout.regions:
             self.assertGreaterEqual(region.rect.left(), 0)
             self.assertLessEqual(region.rect.right(), layout.width)
             self.assertLessEqual(region.rect.bottom(), layout.height)
-        ordered = sorted(layout.regions, key=lambda region: region.rect.top())
-        for earlier, later in zip(ordered, ordered[1:]):
-            self.assertLessEqual(earlier.rect.bottom(), later.rect.top() + 0.01)
+        for index, region in enumerate(layout.regions):
+            for other in layout.regions[index + 1:]:
+                overlap = region.rect.intersected(other.rect)
+                self.assertTrue(
+                    overlap.isEmpty(),
+                    f"{region.kind} überlappt {other.kind}",
+                )
+
+    def test_material_uses_two_columns_without_labels_and_one_with(self):
+        wordless = self.layout(material_items=default_material_items()[:4])
+        tops = {region.tile.top() for region in wordless.regions if region.kind == "material"}
+        self.assertEqual(len(tops), 2, "vier Materialien gehören ohne Beschriftung in zwei Reihen")
+
+        labelled = self.layout(material_items=default_material_items()[:4], show_labels=True)
+        tops = {region.tile.top() for region in labelled.regions if region.kind == "material"}
+        self.assertEqual(len(tops), 4, "mit Beschriftung steht jedes Material in einer eigenen Zeile")
 
     def test_hit_testing_finds_the_region_under_the_pointer(self):
         layout = self.layout()
@@ -208,16 +235,14 @@ class PanelLayoutTests(unittest.TestCase):
             self.assertIs(layout.region_at(region.rect.center()), region)
         self.assertIsNone(layout.region_at(QPointF(layout.width + 10, 10)))
 
-    def test_without_labels_the_panel_gets_narrower_and_keeps_its_regions(self):
-        with_labels = self.layout()
-        without = self.layout(show_labels=False)
-        self.assertLess(without.width, with_labels.width)
-        self.assertEqual(without.headings, [])
-        self.assertEqual([region.label for region in without.regions], [""] * 5)
-        self.assertEqual(
-            [region.kind for region in without.regions],
-            [region.kind for region in with_labels.regions],
-        )
+    def test_start_and_pause_is_the_largest_control(self):
+        layout = self.layout()
+        sizes = {
+            region.kind: region.tile.width()
+            for region in layout.regions if region.kind.startswith("timer-")
+        }
+        self.assertGreater(sizes["timer-toggle"], sizes["timer-minus"])
+        self.assertEqual(sizes["timer-minus"], sizes["timer-plus"])
 
     def test_more_materials_make_the_panel_taller(self):
         short = self.layout(material_items=default_material_items()[:1])
@@ -225,27 +250,72 @@ class PanelLayoutTests(unittest.TestCase):
         self.assertGreater(tall.height, short.height)
         self.assertEqual(tall.width, short.width)
 
-    def test_running_timer_is_captioned_with_its_total(self):
-        def caption(layout):
-            return next(r.label for r in layout.regions if r.kind == "timer")
 
-        self.assertEqual(caption(self.layout(timer_total=20)), "von 20 min")
-        self.assertEqual(caption(self.layout(timer_total=0)), "Zeit einstellen")
+class TimerDisplayTests(unittest.TestCase):
+    def test_remaining_time_is_shown_with_seconds(self):
+        self.assertEqual(format_duration(300), "5:00")
+        self.assertEqual(format_duration(299.4), "5:00")
+        self.assertEqual(format_duration(68), "1:08")
+        self.assertEqual(format_duration(9.2), "0:10")
+        self.assertEqual(format_duration(0), "0:00")
+        self.assertEqual(format_duration(-5), "0:00")
+
+    def test_minutes_can_be_taken_off_a_running_timer(self):
+        now = [0.0]
+        timer = PhaseTimer(lambda: now[0])
+        timer.start(10)
+        now[0] = 60.0
+        timer.add_minutes(-3)
+        self.assertEqual(format_duration(timer.remaining_seconds()), "6:00")
+        self.assertEqual(timer.total_minutes(), 7)
+        self.assertTrue(timer.running)
+
+    def test_taking_off_more_than_is_left_ends_the_timer(self):
+        now = [0.0]
+        timer = PhaseTimer(lambda: now[0])
+        timer.start(5)
+        timer.add_minutes(-99)
+        self.assertEqual(timer.remaining_seconds(), 0.0)
+        self.assertFalse(timer.running)
+        self.assertFalse(timer.paused)
+
+    def test_a_paused_timer_stays_paused_when_minutes_are_added(self):
+        now = [0.0]
+        timer = PhaseTimer(lambda: now[0])
+        timer.start(5)
+        now[0] = 60.0
+        timer.pause()
+        timer.add_minutes(2)
+        self.assertTrue(timer.paused)
+        self.assertFalse(timer.running)
+        now[0] = 5000.0
+        self.assertEqual(format_duration(timer.remaining_seconds()), "6:00")
+
+    def test_nothing_happens_without_a_timer_when_minutes_are_taken_off(self):
+        timer = PhaseTimer(lambda: 0.0)
+        timer.add_minutes(-5)
+        self.assertFalse(timer.has_value())
 
 
 class PanelConfigTests(unittest.TestCase):
     def test_panel_settings_have_defaults_and_are_clamped(self):
         default = soundboard.parse_config({})
         self.assertAlmostEqual(default.panel_y_ratio, 0.08)
-        self.assertTrue(default.panel_show_labels)
+        self.assertFalse(default.panel_show_labels, "Bezeichnungen sind nicht erwünscht")
 
         clamped = soundboard.parse_config({"panel_y_ratio": 4.2, "panel_show_labels": "nope"})
         self.assertEqual(clamped.panel_y_ratio, 1.0)
-        self.assertTrue(clamped.panel_show_labels)
+        self.assertFalse(clamped.panel_show_labels)
 
-        restored = soundboard.parse_config({"panel_y_ratio": 0.5, "panel_show_labels": False})
+        restored = soundboard.parse_config({"panel_y_ratio": 0.5, "panel_show_labels": True})
         self.assertAlmostEqual(restored.panel_y_ratio, 0.5)
-        self.assertFalse(restored.panel_show_labels)
+        self.assertTrue(restored.panel_show_labels)
+
+    def test_timer_sound_path_survives_a_round_trip(self):
+        self.assertEqual(soundboard.parse_config({}).timer_sound_path, "")
+        self.assertEqual(soundboard.parse_config({"timer_sound_path": None}).timer_sound_path, "")
+        kept = soundboard.parse_config({"timer_sound_path": "/tmp/gong.mp3"})
+        self.assertEqual(kept.timer_sound_path, "/tmp/gong.mp3")
 
 
 class BarLayoutTests(unittest.TestCase):
