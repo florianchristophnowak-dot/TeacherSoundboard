@@ -476,6 +476,25 @@ def paint_action_icon(p: QPainter, rect: QRectF, action: str, color: QColor = QC
         p.drawLine(int(cx), int(cy - s*0.22), int(cx), int(cy + s*0.22))
     elif action == "minus":
         p.drawLine(int(cx - s*0.22), int(cy), int(cx + s*0.22), int(cy))
+    elif action == "sound":
+        body = QPainterPath()
+        body.moveTo(cx - s*0.28, cy - s*0.11)
+        body.lineTo(cx - s*0.16, cy - s*0.11)
+        body.lineTo(cx - s*0.02, cy - s*0.26)
+        body.lineTo(cx - s*0.02, cy + s*0.26)
+        body.lineTo(cx - s*0.16, cy + s*0.11)
+        body.lineTo(cx - s*0.28, cy + s*0.11)
+        body.closeSubpath()
+        p.setBrush(QBrush(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPath(body)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(color, max(1.6, s*0.06), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for radius in (0.16, 0.28):
+            p.drawArc(
+                QRectF(cx + s*0.02 - s*radius, cy - s*radius, s*radius*2, s*radius*2),
+                -55*16, 110*16,
+            )
     elif action == "menu":
         p.setBrush(QBrush(color))
         p.setPen(Qt.PenStyle.NoPen)
@@ -1086,6 +1105,7 @@ class TimerControlPopup(QDialog):
     startRequested = pyqtSignal(int)
     resetRequested = pyqtSignal()
     clearRequested = pyqtSignal()
+    soundRequested = pyqtSignal()
 
     def __init__(self, presets: list[int], current_minutes: int, is_running: bool, parent=None):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
@@ -1094,7 +1114,6 @@ class TimerControlPopup(QDialog):
             "QPushButton, QToolButton, QSpinBox { background: #353c44; color: white; border: 0; "
             "border-radius: 8px; padding: 7px; font-size: 17px; font-weight: 700; }"
             "QPushButton:hover, QToolButton:hover { background: #46505c; }"
-            "QSpinBox::up-button, QSpinBox::down-button { width: 20px; background: #46505c; }"
         )
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -1112,21 +1131,35 @@ class TimerControlPopup(QDialog):
 
         custom = QHBoxLayout()
         custom.setSpacing(6)
+        # Eigene Tasten statt der Pfeile des Zahlenfelds: die zeichnet Qt je
+        # nach Plattform unterschiedlich groß, teils gar nicht sichtbar.
         self.custom_minutes = QSpinBox()
         self.custom_minutes.setRange(1, 999)
         self.custom_minutes.setValue(max(1, current_minutes or (presets[0] if presets else 5)))
         self.custom_minutes.setToolTip("Eigene Minutenzahl")
-        self.custom_minutes.setFixedSize(78, 48)
+        self.custom_minutes.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.custom_minutes.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.custom_minutes.setFixedSize(72, 48)
+
+        less = self._action_button("minus", "Eine Minute weniger")
+        less.clicked.connect(self.custom_minutes.stepDown)
+        custom.addWidget(less)
         custom.addWidget(self.custom_minutes)
+        more = self._action_button("plus", "Eine Minute mehr")
+        more.clicked.connect(self.custom_minutes.stepUp)
+        custom.addWidget(more)
 
         play = self._action_button("play", "Mit dieser Dauer starten")
         play.clicked.connect(lambda: self._start(self.custom_minutes.value()))
         custom.addWidget(play)
+        root.addLayout(custom)
 
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
         reset = self._action_button("reset", "Von vorn beginnen")
         reset.setEnabled(is_running)
         reset.clicked.connect(self._reset)
-        custom.addWidget(reset)
+        actions.addWidget(reset)
 
         clear = QToolButton()
         clear.setIcon(QIcon(render_visual_item(VisualItem("clear", "", "clear"), 48)))
@@ -1134,8 +1167,12 @@ class TimerControlPopup(QDialog):
         clear.setFixedSize(54, 48)
         clear.setToolTip("Timer löschen")
         clear.clicked.connect(self._clear)
-        custom.addWidget(clear)
-        root.addLayout(custom)
+        actions.addWidget(clear)
+
+        sound = self._action_button("sound", "Klang am Ende des Timers festlegen")
+        sound.clicked.connect(self._sound)
+        actions.addWidget(sound)
+        root.addLayout(actions)
 
     @staticmethod
     def _action_button(action: str, tooltip: str) -> QToolButton:
@@ -1156,6 +1193,10 @@ class TimerControlPopup(QDialog):
 
     def _clear(self) -> None:
         self.clearRequested.emit()
+        self.accept()
+
+    def _sound(self) -> None:
+        self.soundRequested.emit()
         self.accept()
 
 

@@ -68,7 +68,9 @@ Das Panel zeigt ausschließlich Symbole und Ziffern, keine Bezeichnungen. Wer si
 
 Start, Pause und die Minutentasten liegen unmittelbar im Panel, es ist kein Umweg über ein Menü nötig. Ein Klick auf den Ring öffnet die Dauer-Auswahl mit `5`, `8`, `10` Minuten, einer eigenen Minutenzahl, Neustart und Löschen.
 
-Der Ring zeigt die Restzeit sekundengenau und färbt sich von Grün über Orange nach Rot; ist die Zeit abgelaufen, steht ein voller roter Ring auf `0:00`. Ohne eingestellten Timer zeigt er grau die Startdauer, die sich mit den Minutentasten verändern lässt. Bei Pause wechseln Ring und Ziffern nach Orange, die Schaltfläche zeigt wieder das Startdreieck.
+Der Ring zeigt die Restzeit sekundengenau und färbt sich von Grün über Orange nach Rot; ist die Zeit abgelaufen, steht ein voller roter Ring auf `0:00`. Ohne eingestellten Timer zeigt er grau die Startdauer, die sich mit den Minutentasten verändern lässt. Bei Pause wechseln Ring und Ziffern nach Orange, die Schaltfläche zeigt wieder das Startdreieck. Ein Druck auf Start bei abgelaufener Zeit beginnt dieselbe Dauer von vorn.
+
+Für das Ende lässt sich eine Audiodatei hinterlegen (`mp3`, `wav`, `ogg`, `flac`, `m4a`, `aac`): in der Verwaltung unter *Klang am Ende des Timers* oder über die Lautsprecher-Schaltfläche in der Dauer-Auswahl. Der Klang läuft über einen eigenen Abspieler, unterbricht also einen laufenden Soundboard-Klang nicht und wird von diesem auch nicht abgeschnitten. Er nutzt dasselbe Ausgabegerät und dieselbe Lautstärke wie das Soundboard und ertönt genau einmal je abgelaufenem Timer. Ohne hinterlegte Datei bleibt es beim roten Ring.
 
 Die mitgelieferten Methoden-/Sozialform- und Materialkataloge lassen sich in der Verwaltung bearbeiten. Eigene Einträge können ergänzt, umbenannt, sortiert oder gelöscht werden. Für jeden Eintrag kann ein eigenes PNG-, JPG- oder SVG-Symbol gewählt werden. Importierte Bilder werden in den lokalen Einstellungsordner kopiert und bleiben daher auch erhalten, wenn die ursprüngliche Datei später verschoben wird.
 

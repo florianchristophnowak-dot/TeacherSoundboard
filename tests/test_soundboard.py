@@ -311,6 +311,12 @@ class PanelConfigTests(unittest.TestCase):
         self.assertAlmostEqual(restored.panel_y_ratio, 0.5)
         self.assertTrue(restored.panel_show_labels)
 
+    def test_timer_sound_path_survives_a_round_trip(self):
+        self.assertEqual(soundboard.parse_config({}).timer_sound_path, "")
+        self.assertEqual(soundboard.parse_config({"timer_sound_path": None}).timer_sound_path, "")
+        kept = soundboard.parse_config({"timer_sound_path": "/tmp/gong.mp3"})
+        self.assertEqual(kept.timer_sound_path, "/tmp/gong.mp3")
+
 
 class BarLayoutTests(unittest.TestCase):
     def test_modules_no_longer_share_the_sound_bar(self):
