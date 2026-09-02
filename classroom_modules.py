@@ -86,9 +86,22 @@ def parse_visual_items(raw, defaults: Callable[[], list[VisualItem]]) -> list[Vi
     return parsed
 
 
+# Aufrunden mit Toleranz. Eine Restzeit entsteht als Differenz zweier
+# Uhrabfragen; liefern beide denselben Wert, ergibt (t + 300.0) - t in
+# Gleitkomma nicht immer genau 300, sondern gelegentlich einen Hauch mehr.
+# Ohne Toleranz macht ceil daraus eine ganze Minute zu viel. Unter Windows
+# fällt das auf, weil time.monotonic dort nur rund 15 ms auflöst und zwei
+# kurz aufeinanderfolgende Abfragen deshalb oft gleich ausfallen.
+_CEIL_TOLERANCE = 1e-9
+
+
+def _ceil_units(value: float, unit: float = 1.0) -> int:
+    return int(math.ceil(value / unit - _CEIL_TOLERANCE))
+
+
 def format_duration(seconds: float) -> str:
     """Restzeit als m:ss - die Sekunden zeigen auf einen Blick, dass es läuft."""
-    total = int(math.ceil(max(0.0, seconds) - 1e-9))
+    total = _ceil_units(max(0.0, seconds))
     return f"{total // 60}:{total % 60:02d}"
 
 
@@ -186,10 +199,10 @@ class PhaseTimer:
 
     def remaining_minutes(self) -> int:
         remaining = self.remaining_seconds()
-        return int(math.ceil(remaining / 60.0)) if remaining > 0 else 0
+        return _ceil_units(remaining, 60.0) if remaining > 0 else 0
 
     def total_minutes(self) -> int:
-        return int(math.ceil(self.total_seconds / 60.0)) if self.total_seconds > 0 else 0
+        return _ceil_units(self.total_seconds, 60.0) if self.total_seconds > 0 else 0
 
     def progress(self) -> float:
         if self.total_seconds <= 0:

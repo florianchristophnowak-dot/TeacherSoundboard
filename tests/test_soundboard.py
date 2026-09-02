@@ -271,6 +271,24 @@ class TimerDisplayTests(unittest.TestCase):
         self.assertEqual(format_duration(0), "0:00")
         self.assertEqual(format_duration(-5), "0:00")
 
+    def test_a_coarse_clock_does_not_add_a_phantom_minute(self):
+        # Unter Windows löst time.monotonic nur rund 15 ms auf, zwei kurz
+        # aufeinanderfolgende Abfragen liefern also denselben Wert. Der Rest
+        # ist dann (t + 300.0) - t und das ergibt in Gleitkomma bei manchen
+        # Uhrwerten einen Hauch mehr als 300 Sekunden; ohne Toleranz macht
+        # ceil daraus 6 statt 5 Minuten.
+        tick = 524202.22506058164
+        self.assertGreater(
+            (tick + 300.0) - tick, 300.0,
+            "Uhrwert ohne Rundungsüberschuss - der Test prüft dann nichts mehr",
+        )
+
+        timer = PhaseTimer(lambda: tick)
+        timer.start(5)
+        self.assertEqual(timer.remaining_minutes(), 5)
+        self.assertEqual(timer.total_minutes(), 5)
+        self.assertEqual(format_duration(timer.remaining_seconds()), "5:00")
+
     def test_minutes_can_be_taken_off_a_running_timer(self):
         now = [0.0]
         timer = PhaseTimer(lambda: now[0])
