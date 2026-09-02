@@ -1826,12 +1826,18 @@ class SoundboardWindow(QMainWindow):
             if kind != "handle":
                 continue
             rect = self.slot_rect(slot_index)
-            inset = rect.width() * 0.15
+            inset = rect.width() * 0.20
             inner = rect.adjusted(inset, inset, -inset, -inset)
-            painter.setPen(QPen(QColor(255, 255, 255, 70), max(1.0, rect.width()*0.025)))
-            painter.setBrush(QBrush(QColor(28, 33, 39, 218)))
-            painter.drawRoundedRect(inner, inner.width()*0.25, inner.height()*0.25)
-            paint_action_icon(painter, inner.adjusted(5, 5, -5, -5), "menu")
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor("#5d6874")))
+            painter.drawEllipse(inner)
+            icon_inset = inner.width() * 0.24
+            paint_action_icon(
+                painter,
+                inner.adjusted(icon_inset, icon_inset, -icon_inset, -icon_inset),
+                "menu",
+                QColor("#ffffff"),
+            )
 
     def _refresh_views(self) -> None:
         """Zeichnet Randleiste und Panel neu, ohne die Anordnung zu ändern."""

@@ -215,7 +215,7 @@ _TILE_COLORS = {
     "workbook": QColor("#d97706"),
     "worksheet": QColor("#64748b"),
     "pen": QColor("#e11d48"),
-    "tablet": QColor("#334155"),
+    "tablet": QColor("#4c6382"),
     "headphones": QColor("#b45309"),
     "phase-placeholder": QColor("#3f4854"),
     "material-placeholder": QColor("#3f4854"),
@@ -282,15 +282,16 @@ def _person(p: QPainter, x: float, y: float, scale: float, color: QColor) -> Non
 
 
 def _rounded_background(p: QPainter, rect: QRectF, fill: QColor, selected: bool = False) -> QRectF:
-    inset = max(1.5, rect.width() * 0.055)
+    """Flächige Kachel ohne Umrandung; nur die Auswahl bekommt einen Ring."""
+    inset = max(0.5, rect.width() * 0.02)
     inner = rect.adjusted(inset, inset, -inset, -inset)
-    p.setPen(QPen(QColor(255, 255, 255, 220) if selected else fill.darker(120), max(1.5, rect.width() * 0.035)))
+    p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QBrush(fill))
     p.drawRoundedRect(inner, inner.width() * 0.22, inner.height() * 0.22)
     if selected:
-        p.setPen(QPen(QColor("#ffffff"), max(2.0, rect.width() * 0.055)))
+        p.setPen(QPen(QColor("#ffffff"), max(2.0, rect.width() * 0.05)))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(inner.adjusted(2, 2, -2, -2), inner.width() * 0.18, inner.height() * 0.18)
+        p.drawRoundedRect(inner.adjusted(1, 1, -1, -1), inner.width() * 0.20, inner.height() * 0.20)
     return inner
 
 
@@ -513,7 +514,7 @@ def render_action_icon(action: str, size: int = 42, color: QColor = QColor("#293
     return pixmap
 
 
-TIMER_IDLE = QColor("#8b96a4")
+TIMER_IDLE = QColor("#5d6874")
 TIMER_PAUSED = QColor("#eda34d")
 TIMER_DONE = QColor("#df5d67")
 
@@ -531,43 +532,46 @@ def paint_timer_ring(
     progress: float,
     state: str,
 ) -> None:
-    """Restzeit als Ring mit m:ss. state: running | paused | idle."""
-    inset = rect.width() * 0.05
-    inner = rect.adjusted(inset, inset, -inset, -inset)
-    p.setBrush(QBrush(QColor(24, 28, 34, 225)))
-    p.setPen(QPen(QColor(255, 255, 255, 55), max(1.0, rect.width() * 0.02)))
-    p.drawEllipse(inner)
+    """Restzeit als flächige Scheibe mit m:ss. state: running | paused | idle | done.
 
-    stroke = max(3.0, rect.width() * 0.075)
-    ring = inner.adjusted(stroke, stroke, -stroke, -stroke)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(QColor(255, 255, 255, 60), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-    p.drawArc(ring, 90 * 16, -360 * 16)
-
+    Die Scheibe trägt ihre eigene Farbe, damit Ziffern und Fortschritt ohne
+    Hintergrundkarte auf jedem Bildschirminhalt lesbar bleiben.
+    """
     if state == "idle":
-        color, sweep = TIMER_IDLE, 360 * 16
+        color = TIMER_IDLE
     elif state == "done":
-        # Abgelaufen: voller roter Ring, damit es quer durch den Raum auffällt.
-        color, sweep = TIMER_DONE, 360 * 16
+        color = TIMER_DONE
+    elif state == "paused":
+        color = TIMER_PAUSED
     else:
-        color = TIMER_PAUSED if state == "paused" else timer_arc_color(progress)
-        sweep = max(0, min(360 * 16, int(360 * 16 * progress)))
-    p.setPen(QPen(color, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawArc(ring, 90 * 16, -sweep)
+        color = timer_arc_color(progress)
 
-    # Schriftgröße so wählen, dass auch "12:34" in den Ring passt.
+    disc = rect.adjusted(1, 1, -1, -1)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(color))
+    p.drawEllipse(disc)
+
+    if state in ("running", "paused"):
+        stroke = max(2.5, rect.width() * 0.07)
+        ring = disc.adjusted(stroke, stroke, -stroke, -stroke)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 55), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        p.drawArc(ring, 90 * 16, -360 * 16)
+        p.setPen(QPen(QColor(255, 255, 255, 225), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(ring, 90 * 16, -max(0, min(360 * 16, int(360 * 16 * progress))))
+
     font = QFont()
     font.setBold(True)
-    size = max(10, int(rect.width() * 0.30))
-    limit = ring.width() * 0.86
+    size = max(10, int(rect.width() * 0.32))
+    limit = rect.width() * 0.62
     while size > 9:
         font.setPixelSize(size)
         if QFontMetrics(font).horizontalAdvance(text) <= limit:
             break
         size -= 1
     p.setFont(font)
-    p.setPen(QColor("#ffffff") if state == "running" else color.lighter(125))
-    p.drawText(inner, int(Qt.AlignmentFlag.AlignCenter), text)
+    p.setPen(QColor("#ffffff"))
+    p.drawText(disc, int(Qt.AlignmentFlag.AlignCenter), text)
 
 
 # ---------------- Unterrichtspanel am rechten Bildschirmrand ----------------
@@ -615,7 +619,6 @@ class PanelLayout:
     grip: QRectF
     regions: list[PanelRegion] = field(default_factory=list)
     headings: list[tuple[QRectF, str]] = field(default_factory=list)
-    dividers: list[QRectF] = field(default_factory=list)
 
     def region_at(self, point: QPointF) -> PanelRegion | None:
         for region in self.regions:
@@ -641,19 +644,18 @@ def build_panel_layout(
     durch Linien statt durch Überschriften getrennt.
     """
     unit = max(PANEL_MIN_UNIT, int(unit))
-    pad = round(unit * 0.30)
-    gap = round(unit * 0.30)
-    row_gap = round(unit * 0.16)
+    pad = round(unit * 0.14)
+    gap = round(unit * 0.38)          # Gruppen trennt allein der Abstand
+    row_gap = round(unit * 0.13)
     big = round(unit * 1.50)
     small = unit
     dial = round(unit * 1.90)
     button = round(unit * 0.62)
     toggle = round(unit * 0.86)          # Start/Pause ist das Hauptbedienelement
     button_gap = round(unit * 0.16)
-    grip_height = round(unit * 0.26)
+    grip_height = round(unit * 0.24)
     heading_height = round(unit * 0.42) if show_labels else 0
     name_height = round(unit * 0.48) if show_labels else 0
-    divider_height = 0 if show_labels else round(unit * 0.34)
     columns = 1 if show_labels else PANEL_MATERIAL_COLUMNS
 
     phase_display = phase_item or VisualItem(
@@ -701,14 +703,7 @@ def build_panel_layout(
     def open_section(heading: str) -> None:
         nonlocal y, first_section
         if not first_section:
-            if show_labels:
-                y += gap
-            else:
-                layout.dividers.append(
-                    QRectF(left + content_width * 0.12, y + divider_height / 2.0,
-                           content_width * 0.76, 1.0)
-                )
-                y += divider_height
+            y += gap
         first_section = False
         if show_labels:
             layout.headings.append((QRectF(left, y, content_width, heading_height), heading))
@@ -878,22 +873,11 @@ class ClassroomPanel(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        radius = self.layout_data.unit * 0.30
-        # Über den rechten Rand hinaus zeichnen, damit dort keine Rundung
-        # entsteht: das Panel sitzt bündig an der Bildschirmkante.
-        card = QRectF(0.5, 0.5, self.width() - 1 + radius, self.height() - 1)
-        painter.setBrush(QBrush(QColor(22, 26, 32, 238)))
-        painter.setPen(QPen(QColor(255, 255, 255, 46), 1.4))
-        painter.drawRoundedRect(card, radius, radius)
-
+        # Bewusst ohne Hintergrundkarte: es stehen nur die Symbole im Bild.
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
+        painter.setBrush(QBrush(QColor(125, 134, 146, 190)))
         grip = self.layout_data.grip
         painter.drawRoundedRect(grip, grip.height() / 2.0, grip.height() / 2.0)
-
-        painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
-        for divider in self.layout_data.dividers:
-            painter.drawRect(divider)
 
         painter.setFont(panel_heading_font(self.font(), self.layout_data.unit))
         painter.setPen(QColor("#8d9aab"))
@@ -939,28 +923,25 @@ class ClassroomPanel(QWidget):
         painter.end()
 
     def _paint_hover(self, painter: QPainter, region: PanelRegion) -> None:
+        """Zeigt die Schaltfläche unter dem Zeiger als dünnen Ring."""
         if self._hovered != self._region_key(region):
             return
-        inset = self.layout_data.unit * 0.10
-        painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(
-            region.rect.adjusted(-inset, -inset * 0.5, inset, inset * 0.5), inset, inset
-        )
+        tile = region.tile.adjusted(-2, -2, 2, 2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 205), max(1.6, tile.width() * 0.035)))
+        if region.kind == "timer" or region.kind.startswith("timer-"):
+            painter.drawEllipse(tile)
+        else:
+            painter.drawRoundedRect(tile, tile.width() * 0.24, tile.height() * 0.24)
 
     def _paint_button(self, painter: QPainter, region: PanelRegion, state: str) -> None:
         action = region.action
         if region.kind == "timer-toggle":
             action = "pause" if state == "running" else "play"
-        if region.kind == "timer-toggle":
-            painter.setBrush(QBrush(QColor(76, 87, 102, 245)))
-            painter.setPen(QPen(QColor(255, 255, 255, 80), 1.4))
-        else:
-            painter.setBrush(QBrush(QColor(52, 60, 71, 235)))
-            painter.setPen(QPen(QColor(255, 255, 255, 45), 1.2))
-        radius = region.tile.width() * 0.28
-        painter.drawRoundedRect(region.tile, radius, radius)
-        inset = region.tile.width() * 0.24
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(TIMER_IDLE))
+        painter.drawEllipse(region.tile)
+        inset = region.tile.width() * 0.26
         paint_action_icon(
             painter, region.tile.adjusted(inset, inset, -inset, -inset), action, QColor("#ffffff")
         )
