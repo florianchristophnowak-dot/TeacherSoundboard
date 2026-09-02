@@ -179,14 +179,26 @@ class PanelLayoutTests(unittest.TestCase):
         wordless = self.layout()
         self.assertEqual([region.label for region in wordless.regions], [""] * 8)
         self.assertEqual(wordless.headings, [])
-        # Ohne Überschriften trennen Linien die drei Abschnitte.
-        self.assertEqual(len(wordless.dividers), 2)
 
         labelled = self.layout(show_labels=True)
         self.assertEqual([text for _rect, text in labelled.headings],
                          ["SOZIALFORM", "MATERIAL", "ZEIT", "von 20 min"])
-        self.assertEqual(labelled.dividers, [])
         self.assertGreater(labelled.width, wordless.width)
+
+    def test_groups_are_separated_by_spacing_alone(self):
+        # Ohne Karte und ohne Linien muss allein der Abstand die drei Gruppen
+        # trennen: zwischen ihnen deutlich mehr Luft als innerhalb.
+        layout = self.layout(material_items=default_material_items()[:4])
+        materials = [r for r in layout.regions if r.kind == "material"]
+        phase = next(r for r in layout.regions if r.kind == "phase")
+        timer = next(r for r in layout.regions if r.kind == "timer")
+
+        within = min(materials[2].rect.top() - materials[0].rect.bottom(), 1000)
+        between = min(
+            materials[0].rect.top() - phase.rect.bottom(),
+            timer.rect.top() - materials[-1].rect.bottom(),
+        )
+        self.assertGreater(between, within * 2)
 
     def test_modules_can_be_switched_off_individually(self):
         only_timer = self.layout(show_phase=False, show_materials=False)
@@ -199,7 +211,6 @@ class PanelLayoutTests(unittest.TestCase):
 
         empty = self.layout(show_phase=False, show_materials=False, show_timer=False)
         self.assertEqual(empty.regions, [])
-        self.assertEqual(empty.dividers, [])
 
     def test_empty_selections_stay_clickable_as_placeholders(self):
         layout = self.layout(phase_item=None, material_items=[])
