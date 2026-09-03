@@ -181,7 +181,6 @@ class AppConfig:
     timer_default_minutes: int = 5
     timer_sound_path: str = ""   # Klang, wenn die Zeit abgelaufen ist
     panel_y_ratio: float = 0.08   # senkrechte Lage des Panels am rechten Rand
-    panel_show_labels: bool = False   # ausdrücklich gewünscht: rein bildlich
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -298,7 +297,6 @@ def parse_config(data) -> AppConfig:
         timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
         timer_sound_path=str(data.get("timer_sound_path") or ""),
         panel_y_ratio=_bounded_float(data.get("panel_y_ratio"), 0.08, 0.0, 1.0),
-        panel_show_labels=config_bool("panel_show_labels", False),
     )
 
 
@@ -961,13 +959,6 @@ class ManageDialog(QDialog):
             classroom_layout.addWidget(checkbox)
             self.module_checks[key] = checkbox
 
-        self.panel_labels_check = QCheckBox("Beschriftung")
-        self.panel_labels_check.setToolTip(
-            "Blendet Überschriften und Namen im Panel ein oder aus."
-        )
-        self.panel_labels_check.stateChanged.connect(self._on_panel_labels_changed)
-        classroom_layout.addWidget(self.panel_labels_check)
-
         classroom_layout.addSpacing(12)
         phase_catalog = QPushButton("Methoden/Sozialformen bearbeiten…")
         phase_catalog.clicked.connect(lambda: self.host.open_catalog_editor("phase"))
@@ -1141,10 +1132,6 @@ class ManageDialog(QDialog):
             checkbox.setChecked(module_values[key])
             checkbox.blockSignals(False)
 
-        self.panel_labels_check.blockSignals(True)
-        self.panel_labels_check.setChecked(self.host.cfg.panel_show_labels)
-        self.panel_labels_check.blockSignals(False)
-
         sound_name = self.host.timer_sound_name()
         error = self.host.timer_sound_error
         if error:
@@ -1208,8 +1195,6 @@ class ManageDialog(QDialog):
     def _on_module_changed(self, module: str, state):
         self.host.set_module_visible(module, state == Qt.CheckState.Checked.value)
 
-    def _on_panel_labels_changed(self, state):
-        self.host.set_panel_labels(state == Qt.CheckState.Checked.value)
 
     def _on_global_hotkeys_changed(self, state):
         self.host.set_global_hotkeys_enabled(state == Qt.CheckState.Checked.value)
@@ -1622,7 +1607,6 @@ class SoundboardWindow(QMainWindow):
             "timer_default_minutes": self.cfg.timer_default_minutes,
             "timer_sound_path": self.cfg.timer_sound_path,
             "panel_y_ratio": self.cfg.panel_y_ratio,
-            "panel_show_labels": self.cfg.panel_show_labels,
         }
         try:
             atomic_write_json(self.config_path, data)
@@ -1868,9 +1852,6 @@ class SoundboardWindow(QMainWindow):
         setattr(self.cfg, field_name, bool(visible))
         self._refresh_module_layout()
 
-    def set_panel_labels(self, visible: bool) -> None:
-        self.cfg.panel_show_labels = bool(visible)
-        self._refresh_module_layout()
 
     def activate_target(self, target: tuple[str, object], global_pos: QPoint) -> None:
         kind, payload = target
@@ -2169,12 +2150,6 @@ class SoundboardWindow(QMainWindow):
             )
             module_menu.addAction(action)
 
-        module_menu.addSeparator()
-        labels = QAction("Beschriftung im Panel", self)
-        labels.setCheckable(True)
-        labels.setChecked(self.cfg.panel_show_labels)
-        labels.triggered.connect(self.set_panel_labels)
-        module_menu.addAction(labels)
 
     def open_window_menu(self, global_pos: QPoint):
         menu = QMenu(self)
@@ -2562,8 +2537,6 @@ def run_self_test(app: QApplication) -> int:
             }
             if panel_kinds != expected_kinds:
                 raise RuntimeError(f"Classroom modules missing from panel: {sorted(panel_kinds)}")
-            if any(region.label for region in panel_layout.regions):
-                raise RuntimeError("Panel shows labels although they are switched off")
             if not window.panel.isVisible():
                 raise RuntimeError("Classroom panel did not become visible")
             panel_preview = window.panel.grab()

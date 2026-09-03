@@ -55,22 +55,22 @@ Ohne diese Freigabe startet die App weiterhin stabil und ist per Mausklick sowie
 
 Methode/Sozialform, Material und Timer stehen in einem eigenen Panel am rechten Bildschirmrand, getrennt von der Soundboard-Leiste. Dort ist Platz für große, aus der letzten Reihe lesbare Symbole. Das Panel lässt sich am rechten Rand frei nach oben und unten schieben; angefasst wird es am grauen Griff über dem obersten Symbol, die Lage wird gespeichert.
 
-Das Panel hat bewusst keine Hintergrundkarte und keine Trennlinien: Es stehen nur die farbigen Kacheln im Bild, getrennt allein durch Abstand. Jede Kachel trägt ihre eigene Farbfläche, damit die Symbole ohne Rahmen auf hellem wie auf dunklem Bildschirminhalt lesbar bleiben.
+Das Panel hat bewusst keine Hintergrundkarte, keine Trennlinien und keinerlei Schrift: Es stehen nur die farbigen Kacheln im Bild, getrennt allein durch Abstand und rechtsbündig zur Bildschirmkante angeordnet. Jede Kachel trägt ihre eigene Farbfläche, damit die Symbole ohne Rahmen auf hellem wie auf dunklem Bildschirminhalt lesbar bleiben.
 
 Alle vier Bestandteile sind einzeln zu- und abschaltbar, über das Kontextmenü unter *Anzeige* oder in der Verwaltung:
 
 - Soundboard-Leiste: die Klangschaltflächen am gewählten Bildschirmrand
 - Methode oder Sozialform: Kachel anklicken und ein Symbol auswählen
 - Material: Kachel anklicken und beliebig viele Materialien aktivieren
-- Timer: Restzeit als farbige Scheibe mit Minuten und Sekunden, darunter drei Schaltflächen für eine Minute weniger, Start/Pause und eine Minute mehr
+- Timer: Restzeit als schrumpfender Kreisausschnitt, darunter drei Schaltflächen für eine Minute weniger, Start/Pause und eine Minute mehr
 
-Das Panel zeigt ausschließlich Symbole und Ziffern, keine Bezeichnungen. Wer sie doch möchte, schaltet sie unter *Anzeige → Beschriftung im Panel* zu. Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
+Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
 
 ### Timer
 
 Start, Pause und die Minutentasten liegen unmittelbar im Panel, es ist kein Umweg über ein Menü nötig. Ein Klick auf den Ring öffnet die Dauer-Auswahl mit `5`, `8`, `10` Minuten, einer eigenen Minutenzahl, Neustart und Löschen.
 
-Die Scheibe zeigt die Restzeit sekundengenau und färbt sich von Grün über Orange nach Rot; der helle Bogen an ihrem Rand schrumpft mit der verbleibenden Zeit. Ist die Zeit abgelaufen, steht sie voll rot auf `0:00`. Ohne eingestellten Timer ist sie grau und zeigt die Startdauer, die sich mit den Minutentasten verändern lässt. Bei Pause wechselt sie nach Orange, die Schaltfläche zeigt wieder das Startdreieck. Ein Druck auf Start bei abgelaufener Zeit beginnt dieselbe Dauer von vorn.
+Die Restzeit erscheint als farbiger Kreisausschnitt, der von zwölf Uhr im Uhrzeigersinn schrumpft, und färbt sich dabei von Grün über Orange nach Rot – ablesbar ohne eine einzige Ziffer. Ist die Zeit abgelaufen, steht die Scheibe voll rot. Ohne eingestellten Timer ist sie grau; die Minutentasten verstellen dann die Startdauer. Bei Pause wechselt der Ausschnitt nach Orange, die Schaltfläche zeigt wieder das Startdreieck. Ein Druck auf Start bei abgelaufener Zeit beginnt dieselbe Dauer von vorn.
 
 Für das Ende lässt sich eine Audiodatei hinterlegen (`mp3`, `wav`, `ogg`, `flac`, `m4a`, `aac`): in der Verwaltung unter *Klang am Ende des Timers* oder über die Lautsprecher-Schaltfläche in der Dauer-Auswahl. Der Klang läuft über einen eigenen Abspieler, unterbricht also einen laufenden Soundboard-Klang nicht und wird von diesem auch nicht abgeschnitten. Er nutzt dasselbe Ausgabegerät und dieselbe Lautstärke wie das Soundboard und ertönt genau einmal je abgelaufenem Timer. Ohne hinterlegte Datei bleibt es beim roten Ring.
 

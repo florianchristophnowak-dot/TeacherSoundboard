@@ -99,12 +99,6 @@ def _ceil_units(value: float, unit: float = 1.0) -> int:
     return int(math.ceil(value / unit - _CEIL_TOLERANCE))
 
 
-def format_duration(seconds: float) -> str:
-    """Restzeit als m:ss - die Sekunden zeigen auf einen Blick, dass es läuft."""
-    total = _ceil_units(max(0.0, seconds))
-    return f"{total // 60}:{total % 60:02d}"
-
-
 class PhaseTimer:
     """Driftfester Phasentimer."""
 
@@ -530,6 +524,7 @@ def render_action_icon(action: str, size: int = 42, color: QColor = QColor("#293
 TIMER_IDLE = QColor("#5d6874")
 TIMER_PAUSED = QColor("#eda34d")
 TIMER_DONE = QColor("#df5d67")
+TIMER_SPENT = QColor("#39424f")   # bereits verstrichener Teil des Kreises
 
 
 def timer_arc_color(progress: float) -> QColor:
@@ -538,77 +533,42 @@ def timer_arc_color(progress: float) -> QColor:
     return QColor("#eda34d") if progress > 0 else QColor("#df5d67")
 
 
-def paint_timer_ring(
+def paint_timer_disc(
     p: QPainter,
     rect: QRectF,
-    text: str,
     progress: float,
     state: str,
 ) -> None:
-    """Restzeit als flächige Scheibe mit m:ss. state: running | paused | idle | done.
+    """Restzeit als schrumpfender Kreisausschnitt. state: running | paused | idle | done.
 
-    Die Scheibe trägt ihre eigene Farbe, damit Ziffern und Fortschritt ohne
-    Hintergrundkarte auf jedem Bildschirminhalt lesbar bleiben.
+    Bewusst ohne Ziffern: Der Ausschnitt zeigt die verbleibende Zeit als Fläche
+    und ist damit auch aus der letzten Reihe ablesbar.
     """
-    if state == "idle":
-        color = TIMER_IDLE
-    elif state == "done":
-        color = TIMER_DONE
-    elif state == "paused":
-        color = TIMER_PAUSED
-    else:
-        color = timer_arc_color(progress)
-
     disc = rect.adjusted(1, 1, -1, -1)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(color))
+
+    if state == "idle":
+        p.setBrush(QBrush(TIMER_IDLE))
+        p.drawEllipse(disc)
+        return
+    if state == "done":
+        p.setBrush(QBrush(TIMER_DONE))
+        p.drawEllipse(disc)
+        return
+
+    # Dunkle Scheibe als verbrauchte Zeit, darauf der farbige Rest.
+    p.setBrush(QBrush(TIMER_SPENT))
     p.drawEllipse(disc)
-
-    if state in ("running", "paused"):
-        stroke = max(2.5, rect.width() * 0.07)
-        ring = disc.adjusted(stroke, stroke, -stroke, -stroke)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 55), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-        p.drawArc(ring, 90 * 16, -360 * 16)
-        p.setPen(QPen(QColor(255, 255, 255, 225), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(ring, 90 * 16, -max(0, min(360 * 16, int(360 * 16 * progress))))
-
-    font = QFont()
-    font.setBold(True)
-    size = max(10, int(rect.width() * 0.32))
-    limit = rect.width() * 0.62
-    while size > 9:
-        font.setPixelSize(size)
-        if QFontMetrics(font).horizontalAdvance(text) <= limit:
-            break
-        size -= 1
-    p.setFont(font)
-    p.setPen(QColor("#ffffff"))
-    p.drawText(disc, int(Qt.AlignmentFlag.AlignCenter), text)
+    p.setBrush(QBrush(TIMER_PAUSED if state == "paused" else timer_arc_color(progress)))
+    span = max(0, min(360 * 16, int(round(360 * 16 * progress))))
+    if span > 0:
+        p.drawPie(disc, 90 * 16, -span)
 
 
 # ---------------- Unterrichtspanel am rechten Bildschirmrand ----------------
 PANEL_MIN_UNIT = 36
 PANEL_MAX_UNIT = 96
-PANEL_HEADING_PHASE = "SOZIALFORM"
-PANEL_HEADING_MATERIAL = "MATERIAL"
-PANEL_HEADING_TIMER = "ZEIT"
 PANEL_MATERIAL_COLUMNS = 2
-
-
-def panel_name_font(base: QFont, unit: int) -> QFont:
-    font = QFont(base)
-    font.setPixelSize(max(12, int(unit * 0.30)))
-    font.setBold(True)
-    return font
-
-
-def panel_heading_font(base: QFont, unit: int) -> QFont:
-    font = QFont(base)
-    font.setPixelSize(max(10, int(unit * 0.24)))
-    font.setBold(True)
-    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
-    return font
 
 
 @dataclass
@@ -617,11 +577,9 @@ class PanelRegion:
 
     kind: str                                    # phase | material | timer | timer-*
     rect: QRectF                                 # Klickfläche
-    tile: QRectF                                 # Zeichenfläche für Symbol, Ring oder Taste
+    tile: QRectF                                 # Zeichenfläche für Symbol, Scheibe oder Taste
     item: VisualItem | None = None
     action: str = ""                             # Symbol der Schaltflächen
-    label: str = ""
-    label_rect: QRectF = field(default_factory=QRectF)
 
 
 @dataclass
@@ -631,7 +589,6 @@ class PanelLayout:
     unit: int
     grip: QRectF
     regions: list[PanelRegion] = field(default_factory=list)
-    headings: list[tuple[QRectF, str]] = field(default_factory=list)
 
     def region_at(self, point: QPointF) -> PanelRegion | None:
         for region in self.regions:
@@ -647,14 +604,11 @@ def build_panel_layout(
     show_timer: bool,
     phase_item: VisualItem | None,
     material_items: list[VisualItem],
-    show_labels: bool = False,
-    timer_total: int = 0,
-    measure: Callable[[str], int] | None = None,
 ) -> PanelLayout:
     """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar.
 
-    Ohne Beschriftung liegt das Material zweispaltig und die Abschnitte werden
-    durch Linien statt durch Überschriften getrennt.
+    Das Panel bleibt frei von Schrift; alles steht rechtsbündig, also zur
+    Bildschirmkante hin, an der das Panel klebt.
     """
     unit = max(PANEL_MIN_UNIT, int(unit))
     pad = round(unit * 0.14)
@@ -664,104 +618,70 @@ def build_panel_layout(
     small = unit
     dial = round(unit * 1.90)
     button = round(unit * 0.62)
-    toggle = round(unit * 0.86)          # Start/Pause ist das Hauptbedienelement
+    toggle = round(unit * 0.86)       # Start/Pause ist das Hauptbedienelement
     button_gap = round(unit * 0.16)
     grip_height = round(unit * 0.24)
-    heading_height = round(unit * 0.42) if show_labels else 0
-    name_height = round(unit * 0.48) if show_labels else 0
-    columns = 1 if show_labels else PANEL_MATERIAL_COLUMNS
+    columns = PANEL_MATERIAL_COLUMNS
 
     phase_display = phase_item or VisualItem(
-        "phase-placeholder", "Sozialform wählen", "phase-placeholder"
+        "phase-placeholder", "", "phase-placeholder"
     )
     material_display = material_items or [
-        VisualItem("material-placeholder", "Material wählen", "material-placeholder")
+        VisualItem("material-placeholder", "", "material-placeholder")
     ]
 
     button_row = 2 * button + toggle + 2 * button_gap
-    if show_labels:
-        # Die Namensspalte wird an der tatsächlichen Textbreite ausgerichtet:
-        # eigene Bezeichnungen und Systemschriften unterscheiden sich.
-        text_width = round(unit * 2.50)
-        if measure is not None:
-            needed = [measure(item.name) for item in material_display] if show_materials else []
-            if show_phase:
-                needed.append(measure(phase_display.name) - (small + row_gap))
-            if needed:
-                text_width = int(max(
-                    round(unit * 1.60),
-                    min(round(unit * 3.60), max(needed) + round(unit * 0.20)),
-                ))
-        content_width = small + row_gap + text_width
-    else:
-        content_width = max(
-            big,
-            columns * small + (columns - 1) * row_gap,
-            dial,
-            button_row if show_timer else 0,
-        )
-
+    content_width = max(
+        big,
+        columns * small + (columns - 1) * row_gap,
+        dial,
+        button_row if show_timer else 0,
+    )
     width = pad * 2 + content_width
-    left = float(pad)
+    right = float(pad + content_width)          # alles endet an dieser Kante
 
     layout = PanelLayout(width=width, height=0, unit=unit, grip=QRectF())
     grip_width = round(unit * 0.62)
     layout.grip = QRectF(
-        (width - grip_width) / 2.0, pad * 0.55, grip_width, max(3.0, grip_height * 0.28)
+        right - grip_width, pad * 0.55, grip_width, max(3.0, grip_height * 0.28)
     )
 
     y = float(pad + grip_height)
     first_section = True
 
-    def open_section(heading: str) -> None:
+    def open_section() -> None:
         nonlocal y, first_section
         if not first_section:
             y += gap
         first_section = False
-        if show_labels:
-            layout.headings.append((QRectF(left, y, content_width, heading_height), heading))
-            y += heading_height
 
     if show_phase:
-        open_section(PANEL_HEADING_PHASE)
-        tile = QRectF(left + (content_width - big) / 2.0, y, big, big)
-        layout.regions.append(PanelRegion(
-            "phase", QRectF(left, y, content_width, big + name_height), tile,
-            phase_display, "", phase_display.name if show_labels else "",
-            QRectF(left, y + big, content_width, name_height),
-        ))
-        y += big + name_height
+        open_section()
+        tile = QRectF(right - big, y, big, big)
+        layout.regions.append(PanelRegion("phase", QRectF(tile), tile, phase_display))
+        y += big
 
     if show_materials:
-        open_section(PANEL_HEADING_MATERIAL)
+        open_section()
         for index in range(0, len(material_display), columns):
             row_items = material_display[index:index + columns]
             row_width = len(row_items) * small + (len(row_items) - 1) * row_gap
-            x = left + (content_width - row_width) / 2.0 if columns > 1 else left
+            x = right - row_width
             for item in row_items:
                 tile = QRectF(x, y, small, small)
-                if show_labels:
-                    click = QRectF(left, y, content_width, small)
-                    label_rect = QRectF(left + small + row_gap, y, content_width - small - row_gap, small)
-                else:
-                    click = tile
-                    label_rect = QRectF()
-                layout.regions.append(PanelRegion(
-                    "material", click, tile, item, "",
-                    item.name if show_labels else "", label_rect,
-                ))
+                layout.regions.append(PanelRegion("material", QRectF(tile), tile, item))
                 x += small + row_gap
             y += small
             if index + columns < len(material_display):
                 y += row_gap
 
     if show_timer:
-        open_section(PANEL_HEADING_TIMER)
-        ring = QRectF(left + (content_width - dial) / 2.0, y, dial, dial)
+        open_section()
+        ring = QRectF(right - dial, y, dial, dial)
         layout.regions.append(PanelRegion("timer", QRectF(ring), ring))
         y += dial + row_gap
 
-        x = left + (content_width - button_row) / 2.0
+        x = right - button_row
         for kind, action, size in (
             ("timer-minus", "minus", button),
             ("timer-toggle", "play", toggle),
@@ -771,11 +691,6 @@ def build_panel_layout(
             layout.regions.append(PanelRegion(kind, QRectF(tile), tile, None, action))
             x += size + button_gap
         y += toggle
-
-        if show_labels:
-            caption = f"von {timer_total} min" if timer_total > 0 else "Zeit einstellen"
-            layout.headings.append((QRectF(left, y, content_width, name_height), caption))
-            y += name_height
 
     layout.height = int(round(y + pad))
     return layout
@@ -838,9 +753,6 @@ class ClassroomPanel(QWidget):
                 cfg.show_timer,
                 self.host.selected_phase_item(),
                 self.host.selected_material_items(),
-                show_labels=cfg.panel_show_labels,
-                timer_total=timer.total_minutes(),
-                measure=QFontMetrics(panel_name_font(self.font(), unit)).horizontalAdvance,
             )
             if layout.height <= available.height() or unit <= PANEL_MIN_UNIT:
                 break
@@ -892,46 +804,15 @@ class ClassroomPanel(QWidget):
         grip = self.layout_data.grip
         painter.drawRoundedRect(grip, grip.height() / 2.0, grip.height() / 2.0)
 
-        painter.setFont(panel_heading_font(self.font(), self.layout_data.unit))
-        painter.setPen(QColor("#8d9aab"))
-        for rect, text in self.layout_data.headings:
-            alignment = (
-                Qt.AlignmentFlag.AlignHCenter if text.startswith(("von ", "Zeit"))
-                else Qt.AlignmentFlag.AlignLeft
-            )
-            painter.drawText(rect, int(alignment | Qt.AlignmentFlag.AlignVCenter), text)
-
         state = self.timer_state()
-        timer = self.host.phase_timer
-        name_font = panel_name_font(self.font(), self.layout_data.unit)
         for region in self.layout_data.regions:
             self._paint_hover(painter, region)
-
             if region.kind == "timer":
-                text = (
-                    format_duration(timer.remaining_seconds()) if state != "idle"
-                    else format_duration(self.host.cfg.timer_default_minutes * 60)
-                )
-                paint_timer_ring(painter, region.tile, text, timer.progress(), state)
+                paint_timer_disc(painter, region.tile, self.host.phase_timer.progress(), state)
             elif region.kind.startswith("timer-"):
                 self._paint_button(painter, region, state)
             elif region.item is not None:
                 paint_visual_item(painter, region.tile, region.item)
-
-            if not region.label:
-                continue
-            painter.setFont(name_font)
-            painter.setPen(QColor("#eef2f7"))
-            metrics = QFontMetrics(name_font)
-            text = metrics.elidedText(
-                region.label, Qt.TextElideMode.ElideRight, int(region.label_rect.width())
-            )
-            alignment = (
-                Qt.AlignmentFlag.AlignLeft
-                if region.kind == "material"
-                else Qt.AlignmentFlag.AlignHCenter
-            )
-            painter.drawText(region.label_rect, int(alignment | Qt.AlignmentFlag.AlignVCenter), text)
 
         painter.end()
 
