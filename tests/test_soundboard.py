@@ -8,7 +8,6 @@ from PyQt6.QtCore import QPointF
 import soundboard
 from classroom_modules import (
     PhaseTimer, build_panel_layout, default_material_items, default_phase_items,
-    format_duration,
 )
 
 
@@ -159,8 +158,6 @@ class PanelLayoutTests(unittest.TestCase):
             show_timer=True,
             phase_item=default_phase_items()[2],
             material_items=default_material_items()[:3],
-            show_labels=False,
-            timer_total=20,
         )
         options.update(overrides)
         return build_panel_layout(**options)
@@ -175,15 +172,39 @@ class PanelLayoutTests(unittest.TestCase):
             "timer", "timer-minus", "timer-toggle", "timer-plus",
         ])
 
-    def test_panel_stays_wordless_unless_labels_are_switched_on(self):
-        wordless = self.layout()
-        self.assertEqual([region.label for region in wordless.regions], [""] * 8)
-        self.assertEqual(wordless.headings, [])
+    def test_everything_is_flush_with_the_right_edge(self):
+        # Das Panel klebt an der Bildschirmkante, also enden alle Elemente an
+        # derselben rechten Kante statt mittig zu schweben.
+        layout = self.layout(material_items=default_material_items()[:4])
+        edges = {round(region.tile.right(), 3) for region in layout.regions
+                 if region.kind in ("phase", "timer")}
+        rows = {}
+        for region in layout.regions:
+            if region.kind == "material":
+                rows.setdefault(round(region.tile.top(), 3), []).append(region.tile.right())
+        edges.update(round(max(right), 3) for right in rows.values())
+        edges.add(round(layout.grip.right(), 3))
+        edges.add(round(max(r.tile.right() for r in layout.regions
+                            if r.kind == "timer-plus"), 3))
+        self.assertEqual(len(edges), 1, f"unterschiedliche rechte Kanten: {sorted(edges)}")
+        self.assertLess(layout.width - edges.pop(), layout.unit * 0.2)
 
-        labelled = self.layout(show_labels=True)
-        self.assertEqual([text for _rect, text in labelled.headings],
-                         ["SOZIALFORM", "MATERIAL", "ZEIT", "von 20 min"])
-        self.assertGreater(labelled.width, wordless.width)
+    def test_an_odd_material_sits_on_the_right_of_its_row(self):
+        layout = self.layout(material_items=default_material_items()[:3])
+        rows = {}
+        for region in layout.regions:
+            if region.kind == "material":
+                rows.setdefault(round(region.tile.top(), 3), []).append(region.tile)
+        last_row = rows[max(rows)]
+        self.assertEqual(len(last_row), 1)
+        full_row = rows[min(rows)]
+        self.assertAlmostEqual(last_row[0].right(), max(t.right() for t in full_row), places=3)
+
+    def test_the_panel_carries_no_text_at_all(self):
+        layout = self.layout()
+        for region in layout.regions:
+            self.assertFalse(hasattr(region, "label"), "Beschriftungen sind nicht erwünscht")
+        self.assertFalse(hasattr(layout, "headings"))
 
     def test_groups_are_separated_by_spacing_alone(self):
         # Ohne Karte und ohne Linien muss allein der Abstand die drei Gruppen
@@ -193,7 +214,7 @@ class PanelLayoutTests(unittest.TestCase):
         phase = next(r for r in layout.regions if r.kind == "phase")
         timer = next(r for r in layout.regions if r.kind == "timer")
 
-        within = min(materials[2].rect.top() - materials[0].rect.bottom(), 1000)
+        within = materials[2].rect.top() - materials[0].rect.bottom()
         between = min(
             materials[0].rect.top() - phase.rect.bottom(),
             timer.rect.top() - materials[-1].rect.bottom(),
@@ -225,20 +246,15 @@ class PanelLayoutTests(unittest.TestCase):
             self.assertLessEqual(region.rect.bottom(), layout.height)
         for index, region in enumerate(layout.regions):
             for other in layout.regions[index + 1:]:
-                overlap = region.rect.intersected(other.rect)
                 self.assertTrue(
-                    overlap.isEmpty(),
+                    region.rect.intersected(other.rect).isEmpty(),
                     f"{region.kind} überlappt {other.kind}",
                 )
 
-    def test_material_uses_two_columns_without_labels_and_one_with(self):
-        wordless = self.layout(material_items=default_material_items()[:4])
-        tops = {region.tile.top() for region in wordless.regions if region.kind == "material"}
-        self.assertEqual(len(tops), 2, "vier Materialien gehören ohne Beschriftung in zwei Reihen")
-
-        labelled = self.layout(material_items=default_material_items()[:4], show_labels=True)
-        tops = {region.tile.top() for region in labelled.regions if region.kind == "material"}
-        self.assertEqual(len(tops), 4, "mit Beschriftung steht jedes Material in einer eigenen Zeile")
+    def test_material_is_laid_out_in_two_columns(self):
+        layout = self.layout(material_items=default_material_items()[:4])
+        tops = {region.tile.top() for region in layout.regions if region.kind == "material"}
+        self.assertEqual(len(tops), 2, "vier Materialien gehören in zwei Reihen")
 
     def test_hit_testing_finds_the_region_under_the_pointer(self):
         layout = self.layout()
@@ -263,13 +279,22 @@ class PanelLayoutTests(unittest.TestCase):
 
 
 class TimerDisplayTests(unittest.TestCase):
-    def test_remaining_time_is_shown_with_seconds(self):
-        self.assertEqual(format_duration(300), "5:00")
-        self.assertEqual(format_duration(299.4), "5:00")
-        self.assertEqual(format_duration(68), "1:08")
-        self.assertEqual(format_duration(9.2), "0:10")
-        self.assertEqual(format_duration(0), "0:00")
-        self.assertEqual(format_duration(-5), "0:00")
+    def test_a_coarse_clock_does_not_add_a_phantom_minute(self):
+        # Unter Windows löst time.monotonic nur rund 15 ms auf, zwei kurz
+        # aufeinanderfolgende Abfragen liefern also denselben Wert. Der Rest
+        # ist dann (t + 300.0) - t und das ergibt in Gleitkomma bei manchen
+        # Uhrwerten einen Hauch mehr als 300 Sekunden; ohne Toleranz macht
+        # ceil daraus 6 statt 5 Minuten.
+        tick = 524202.22506058164
+        self.assertGreater(
+            (tick + 300.0) - tick, 300.0,
+            "Uhrwert ohne Rundungsüberschuss - der Test prüft dann nichts mehr",
+        )
+
+        timer = PhaseTimer(lambda: tick)
+        timer.start(5)
+        self.assertEqual(timer.remaining_minutes(), 5)
+        self.assertEqual(timer.total_minutes(), 5)
 
     def test_minutes_can_be_taken_off_a_running_timer(self):
         now = [0.0]
@@ -277,7 +302,7 @@ class TimerDisplayTests(unittest.TestCase):
         timer.start(10)
         now[0] = 60.0
         timer.add_minutes(-3)
-        self.assertEqual(format_duration(timer.remaining_seconds()), "6:00")
+        self.assertAlmostEqual(timer.remaining_seconds(), 360.0)
         self.assertEqual(timer.total_minutes(), 7)
         self.assertTrue(timer.running)
 
@@ -300,7 +325,7 @@ class TimerDisplayTests(unittest.TestCase):
         self.assertTrue(timer.paused)
         self.assertFalse(timer.running)
         now[0] = 5000.0
-        self.assertEqual(format_duration(timer.remaining_seconds()), "6:00")
+        self.assertAlmostEqual(timer.remaining_seconds(), 360.0)
 
     def test_nothing_happens_without_a_timer_when_minutes_are_taken_off(self):
         timer = PhaseTimer(lambda: 0.0)
@@ -310,17 +335,16 @@ class TimerDisplayTests(unittest.TestCase):
 
 class PanelConfigTests(unittest.TestCase):
     def test_panel_settings_have_defaults_and_are_clamped(self):
-        default = soundboard.parse_config({})
-        self.assertAlmostEqual(default.panel_y_ratio, 0.08)
-        self.assertFalse(default.panel_show_labels, "Bezeichnungen sind nicht erwünscht")
-
-        clamped = soundboard.parse_config({"panel_y_ratio": 4.2, "panel_show_labels": "nope"})
-        self.assertEqual(clamped.panel_y_ratio, 1.0)
-        self.assertFalse(clamped.panel_show_labels)
-
-        restored = soundboard.parse_config({"panel_y_ratio": 0.5, "panel_show_labels": True})
-        self.assertAlmostEqual(restored.panel_y_ratio, 0.5)
-        self.assertTrue(restored.panel_show_labels)
+        self.assertAlmostEqual(soundboard.parse_config({}).panel_y_ratio, 0.08)
+        self.assertEqual(soundboard.parse_config({"panel_y_ratio": 4.2}).panel_y_ratio, 1.0)
+        self.assertAlmostEqual(
+            soundboard.parse_config({"panel_y_ratio": 0.5}).panel_y_ratio, 0.5
+        )
+        # Die frühere Beschriftungs-Einstellung darf einen alten Stand nicht stören.
+        self.assertAlmostEqual(
+            soundboard.parse_config({"panel_show_labels": True, "panel_y_ratio": 0.3}).panel_y_ratio,
+            0.3,
+        )
 
     def test_timer_sound_path_survives_a_round_trip(self):
         self.assertEqual(soundboard.parse_config({}).timer_sound_path, "")
