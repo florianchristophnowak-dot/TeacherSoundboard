@@ -443,6 +443,131 @@ def render_visual_item(item: VisualItem, size: int = 64, selected: bool = False)
     return pixmap
 
 
+# ---------------- Boîte à Oublis: die Kachel für die Sprachhilfe ----------------
+# Die Kachel ist rein bildlich. Der Zustand steckt in Farbe und Motiv:
+#   offline  graue Kachel, hohle Leinwand, durchgestrichen
+#   ready    blaue Kachel, leere Leinwand, keine Stufenbalken
+#   live     grüne Kachel, beschriebene Leinwand, Stufenbalken 1-3
+#   blank    dunkle Kachel mit grünem Rand, Leinwand mit Rollo
+BOITE_COLORS = {
+    "offline": QColor("#3f4854"),
+    "ready": QColor("#2f6f8f"),
+    "live": QColor("#1d9a6c"),
+    "blank": QColor("#38424e"),
+}
+BOITE_RIM = QColor("#1d9a6c")
+
+
+def paint_level_bars(
+    p: QPainter,
+    rect: QRectF,
+    level: int,
+    total: int = 3,
+    color: QColor = _INK,
+) -> None:
+    """Unterstützungsstufe als Balkenreihe - ohne eine einzige Ziffer."""
+    total = max(1, total)
+    level = max(0, min(total, level))
+    gap = rect.width() * 0.10
+    bar_width = (rect.width() - gap * (total - 1)) / total
+    height = rect.height()
+    x = rect.left()
+    for index in range(total):
+        # Ansteigende Höhe: Auch ohne Farbe bleibt die Reihenfolge ablesbar.
+        share = 0.45 + 0.55 * (index / max(1, total - 1))
+        bar = QRectF(x, rect.bottom() - height * share, bar_width, height * share)
+        radius = min(bar_width, bar.height()) * 0.35
+        if index < level:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(color))
+        else:
+            p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 130),
+                          max(1.2, rect.height() * 0.10)))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(bar, radius, radius)
+        x += bar_width + gap
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def paint_boite_tile(p: QPainter, rect: QRectF, state: str = "offline", level: int = 0) -> None:
+    """Zeichnet die Boîte-Kachel in einem der vier Zustände."""
+    state = state if state in BOITE_COLORS else "offline"
+    inner = _rounded_background(p, rect, BOITE_COLORS[state])
+
+    if state == "blank":
+        p.setPen(QPen(BOITE_RIM, max(2.0, inner.width() * 0.055)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(inner.adjusted(1.5, 1.5, -1.5, -1.5),
+                          inner.width() * 0.20, inner.height() * 0.20)
+
+    size = min(inner.width(), inner.height())
+    ink = _INK if state != "offline" else QColor(255, 255, 255, 120)
+    stroke = max(1.8, size * 0.055)
+
+    screen = QRectF(
+        inner.center().x() - size * 0.33,
+        inner.top() + size * 0.16,
+        size * 0.66,
+        size * 0.42,
+    )
+    p.setPen(QPen(ink, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                  Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(screen, size * 0.05, size * 0.05)
+    # Ständer: macht aus dem Rechteck eine Projektionsfläche.
+    p.drawLine(int(screen.center().x()), int(screen.bottom()),
+               int(screen.center().x()), int(screen.bottom() + size * 0.09))
+    p.drawLine(int(screen.center().x() - size * 0.12), int(screen.bottom() + size * 0.09),
+               int(screen.center().x() + size * 0.12), int(screen.bottom() + size * 0.09))
+
+    if state == "live":
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(ink))
+        line_height = screen.height() * 0.12
+        for index, width in enumerate((0.72, 0.52, 0.62)):
+            y = screen.top() + screen.height() * (0.24 + index * 0.26)
+            p.drawRoundedRect(
+                QRectF(screen.left() + screen.width() * 0.14, y,
+                       screen.width() * width, line_height),
+                line_height / 2.0, line_height / 2.0,
+            )
+    elif state == "blank":
+        # Rollo herunter: Die Leinwand ist da, zeigt aber nichts.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(ink))
+        bar = QRectF(screen.left() + screen.width() * 0.12,
+                     screen.center().y() - screen.height() * 0.07,
+                     screen.width() * 0.76, screen.height() * 0.14)
+        p.drawRoundedRect(bar, bar.height() / 2.0, bar.height() / 2.0)
+    elif state == "offline":
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 150), stroke, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap))
+        p.drawLine(int(inner.left() + size * 0.18), int(inner.bottom() - size * 0.18),
+                   int(inner.right() - size * 0.18), int(inner.top() + size * 0.18))
+
+    if state in ("live", "blank") and level:
+        bars = QRectF(
+            inner.center().x() - size * 0.26,
+            screen.bottom() + size * 0.16,
+            size * 0.52,
+            size * 0.16,
+        )
+        bar_ink = ink if state == "live" else QColor(255, 255, 255, 170)
+        paint_level_bars(p, bars, level, 3, bar_ink)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def render_boite_tile(state: str, level: int = 0, size: int = 64) -> QPixmap:
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    paint_boite_tile(painter, QRectF(0, 0, size, size), state, level)
+    painter.end()
+    return pixmap
+
+
 def paint_action_icon(p: QPainter, rect: QRectF, action: str, color: QColor = QColor("#f4f4f4")) -> None:
     s = min(rect.width(), rect.height())
     cx, cy = rect.center().x(), rect.center().y()
@@ -509,6 +634,72 @@ def paint_action_icon(p: QPainter, rect: QRectF, action: str, color: QColor = QC
         for dx in (-0.16, 0.16):
             for dy in (-0.16, 0.16):
                 p.drawEllipse(QRectF(cx + s*dx - s*0.055, cy + s*dy - s*0.055, s*0.11, s*0.11))
+    elif action in ("prev", "next"):
+        direction = -1.0 if action == "prev" else 1.0
+        path = QPainterPath()
+        path.moveTo(cx - direction*s*0.14, cy - s*0.24)
+        path.lineTo(cx + direction*s*0.20, cy)
+        path.lineTo(cx - direction*s*0.14, cy + s*0.24)
+        path.closeSubpath()
+        p.setBrush(QBrush(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPath(path)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(color, max(2.0, s*0.07), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(
+            int(cx + direction*s*0.27), int(cy - s*0.22),
+            int(cx + direction*s*0.27), int(cy + s*0.22),
+        )
+    elif action in ("eye", "eye-off"):
+        lid = QPainterPath()
+        lid.moveTo(cx - s*0.30, cy)
+        lid.quadTo(cx, cy - s*0.30, cx + s*0.30, cy)
+        lid.quadTo(cx, cy + s*0.30, cx - s*0.30, cy)
+        p.drawPath(lid)
+        p.setBrush(QBrush(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QRectF(cx - s*0.09, cy - s*0.09, s*0.18, s*0.18))
+        if action == "eye-off":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(color, max(2.0, s*0.08), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(int(cx - s*0.28), int(cy + s*0.26), int(cx + s*0.28), int(cy - s*0.26))
+    elif action == "stop":
+        p.setBrush(QBrush(color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(QRectF(cx - s*0.21, cy - s*0.21, s*0.42, s*0.42), s*0.06, s*0.06)
+    elif action == "open":
+        p.drawLine(int(cx - s*0.04), int(cy + s*0.04), int(cx + s*0.26), int(cy - s*0.26))
+        p.drawLine(int(cx + s*0.06), int(cy - s*0.26), int(cx + s*0.26), int(cy - s*0.26))
+        p.drawLine(int(cx + s*0.26), int(cy - s*0.26), int(cx + s*0.26), int(cy - s*0.06))
+        path = QPainterPath()
+        path.moveTo(cx + s*0.10, cy + s*0.06)
+        path.lineTo(cx + s*0.10, cy + s*0.26)
+        path.lineTo(cx - s*0.26, cy + s*0.26)
+        path.lineTo(cx - s*0.26, cy - s*0.10)
+        path.lineTo(cx - s*0.06, cy - s*0.10)
+        p.drawPath(path)
+    elif action == "live":
+        bubble = QPainterPath()
+        bubble.addRoundedRect(QRectF(cx - s*0.28, cy - s*0.26, s*0.56, s*0.40), s*0.10, s*0.10)
+        bubble.moveTo(cx - s*0.10, cy + s*0.14)
+        bubble.lineTo(cx - s*0.14, cy + s*0.28)
+        bubble.lineTo(cx + s*0.02, cy + s*0.14)
+        p.drawPath(bubble)
+        p.setPen(QPen(color, max(1.8, s*0.07), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(int(cx - s*0.12), int(cy - s*0.06), int(cx + s*0.12), int(cy - s*0.06))
+        p.drawLine(int(cx), int(cy - s*0.18), int(cx), int(cy + s*0.06))
+    elif action.startswith("level"):
+        # Unterstützungsstufe ohne Ziffern: ein, zwei oder drei Balken.
+        try:
+            level = max(1, min(3, int(action[-1])))
+        except ValueError:
+            level = 1
+        paint_level_bars(p, rect, level, 3, color)
+    elif action == "link":
+        radius = s * 0.15
+        p.drawArc(QRectF(cx - s*0.30, cy - radius, radius*2, radius*2), 90*16, 180*16)
+        p.drawArc(QRectF(cx + s*0.30 - radius*2, cy - radius, radius*2, radius*2), -90*16, 180*16)
+        p.drawLine(int(cx - s*0.10), int(cy), int(cx + s*0.10), int(cy))
 
 
 def render_action_icon(action: str, size: int = 42, color: QColor = QColor("#29313a")) -> QPixmap:
@@ -575,11 +766,13 @@ PANEL_MATERIAL_COLUMNS = 2
 class PanelRegion:
     """Ein anklickbarer Bereich des Panels."""
 
-    kind: str                                    # phase | material | timer | timer-*
+    kind: str                                    # boite | phase | material | timer | timer-*
     rect: QRectF                                 # Klickfläche
     tile: QRectF                                 # Zeichenfläche für Symbol, Scheibe oder Taste
     item: VisualItem | None = None
     action: str = ""                             # Symbol der Schaltflächen
+    state: str = ""                              # Zustand der Boîte-Kachel
+    level: int = 0                               # Unterstützungsstufe der Boîte-Kachel
 
 
 @dataclass
@@ -604,6 +797,9 @@ def build_panel_layout(
     show_timer: bool,
     phase_item: VisualItem | None,
     material_items: list[VisualItem],
+    show_boite: bool = False,
+    boite_state: str = "offline",
+    boite_level: int = 0,
 ) -> PanelLayout:
     """Berechnet die Panelgeometrie ohne Fenster - dadurch für sich testbar.
 
@@ -654,6 +850,14 @@ def build_panel_layout(
         if not first_section:
             y += gap
         first_section = False
+
+    if show_boite:
+        open_section()
+        tile = QRectF(right - big, y, big, big)
+        layout.regions.append(PanelRegion(
+            "boite", QRectF(tile), tile, None, "", boite_state, boite_level
+        ))
+        y += big
 
     if show_phase:
         open_section()
@@ -726,7 +930,7 @@ class ClassroomPanel(QWidget):
     # ---- Geometrie
     def has_content(self) -> bool:
         cfg = self.host.cfg
-        return bool(cfg.show_phase or cfg.show_materials or cfg.show_timer)
+        return bool(cfg.show_boite or cfg.show_phase or cfg.show_materials or cfg.show_timer)
 
     def unit_for_screen(self) -> int:
         available = self.host.current_screen().availableGeometry()
@@ -739,9 +943,9 @@ class ClassroomPanel(QWidget):
             return
 
         cfg = self.host.cfg
-        timer = self.host.phase_timer
         available = self.host.current_screen().availableGeometry()
         unit = self.unit_for_screen()
+        boite = self.host.boite_tile_state()
 
         # Bei vielen Materialien darf das Panel nicht über den Bildschirm
         # hinauswachsen: notfalls kleiner rechnen, bis es passt.
@@ -753,6 +957,9 @@ class ClassroomPanel(QWidget):
                 cfg.show_timer,
                 self.host.selected_phase_item(),
                 self.host.selected_material_items(),
+                show_boite=cfg.show_boite,
+                boite_state=boite[0],
+                boite_level=boite[1],
             )
             if layout.height <= available.height() or unit <= PANEL_MIN_UNIT:
                 break
@@ -807,7 +1014,9 @@ class ClassroomPanel(QWidget):
         state = self.timer_state()
         for region in self.layout_data.regions:
             self._paint_hover(painter, region)
-            if region.kind == "timer":
+            if region.kind == "boite":
+                paint_boite_tile(painter, region.tile, region.state, region.level)
+            elif region.kind == "timer":
                 paint_timer_disc(painter, region.tile, self.host.phase_timer.progress(), state)
             elif region.kind.startswith("timer-"):
                 self._paint_button(painter, region, state)
@@ -850,6 +1059,11 @@ class ClassroomPanel(QWidget):
             return
         global_pos = event.globalPosition().toPoint()
         if event.button() == Qt.MouseButton.RightButton:
+            region = self.layout_data.region_at(event.position())
+            # Rechtsklick auf die Boîte-Kachel öffnet deren eigene Steuerung.
+            if region is not None and region.kind == "boite":
+                self.host.open_boite_controls(global_pos)
+                return
             self.host.open_window_menu(global_pos)
             return
         if event.button() != Qt.MouseButton.LeftButton:
@@ -862,7 +1076,9 @@ class ClassroomPanel(QWidget):
             event.accept()
             return
 
-        if region.kind == "phase":
+        if region.kind == "boite":
+            self.host.toggle_boite_blank(global_pos)
+        elif region.kind == "phase":
             self.host.open_phase_picker(global_pos)
         elif region.kind == "material":
             self.host.open_material_picker(global_pos)
@@ -1072,6 +1288,182 @@ class TimerControlPopup(QDialog):
 
     def _sound(self) -> None:
         self.soundRequested.emit()
+        self.accept()
+
+
+class BoiteControlPopup(QDialog):
+    """Kompakte Steuerung der Sprachhilfe.
+
+    Ein lehrkraftbezogenes Pop-up: Hier darf Schrift stehen, damit Titel,
+    Lerngruppe und Seitenzahl ablesbar sind. Die für die Klasse sichtbare
+    Kachel im Panel bleibt davon unberührt rein bildlich.
+    """
+
+    commandRequested = pyqtSignal(str, object)
+    liveHelpRequested = pyqtSignal()
+    openAppRequested = pyqtSignal()
+    presetRequested = pyqtSignal(str)
+    manageRequested = pyqtSignal()
+
+    def __init__(self, status, presets=(), parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet(
+            "QDialog { background: #20252b; border: 1px solid #59616b; border-radius: 8px; }"
+            "QLabel { color: #dfe4ea; font-size: 12px; }"
+            "QLabel#title { color: #ffffff; font-size: 14px; font-weight: 700; }"
+            "QPushButton, QToolButton { background: #353c44; color: white; border: 0; "
+            "border-radius: 8px; padding: 6px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover, QToolButton:hover { background: #46505c; }"
+            "QToolButton:disabled, QPushButton:disabled { background: #2a3038; color: #7b8593; }"
+            "QToolButton[current=\"true\"] { background: #1d9a6c; }"
+        )
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        connected = bool(getattr(status, "connected", False))
+        active = bool(getattr(status, "active", False))
+        level = int(getattr(status, "level", 0) or 0)
+        blank = bool(getattr(status, "blank", False))
+
+        title = QLabel(self._headline(status))
+        title.setObjectName("title")
+        title.setWordWrap(True)
+        root.addWidget(title)
+
+        detail = self._detail(status)
+        if detail:
+            note = QLabel(detail)
+            note.setWordWrap(True)
+            root.addWidget(note)
+
+        navigation = QHBoxLayout()
+        navigation.setSpacing(6)
+        self.prev_button = self._action("prev", "Vorherige Seite")
+        self.prev_button.clicked.connect(lambda: self._send("page.prev"))
+        navigation.addWidget(self.prev_button)
+
+        self.blank_button = self._action(
+            "eye-off" if blank else "eye",
+            "Sprachhilfe wieder einblenden" if blank else "Sprachhilfe ausblenden",
+        )
+        self.blank_button.clicked.connect(lambda: self._send("blank.toggle"))
+        navigation.addWidget(self.blank_button)
+
+        self.next_button = self._action("next", "Nächste Seite")
+        self.next_button.clicked.connect(lambda: self._send("page.next"))
+        navigation.addWidget(self.next_button)
+        root.addLayout(navigation)
+
+        levels = QHBoxLayout()
+        levels.setSpacing(6)
+        self.level_buttons = []
+        for value in (1, 2, 3):
+            button = self._action(f"level{value}", f"Unterstützungsstufe {value}")
+            button.setProperty("current", "true" if value == level else "false")
+            button.clicked.connect(lambda checked=False, v=value: self._send("level.set", {"level": v}))
+            levels.addWidget(button)
+            self.level_buttons.append(button)
+        root.addLayout(levels)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self.live_button = self._action("live", "Live-Hilfe einblenden")
+        self.live_button.clicked.connect(self._live)
+        actions.addWidget(self.live_button)
+
+        self.stop_button = self._action("stop", "Projektion beenden")
+        self.stop_button.clicked.connect(lambda: self._send("session.stop"))
+        actions.addWidget(self.stop_button)
+
+        self.open_button = self._action("open", "Boîte à Oublis öffnen")
+        self.open_button.clicked.connect(self._open_app)
+        actions.addWidget(self.open_button)
+        root.addLayout(actions)
+
+        for button in (self.prev_button, self.next_button, self.blank_button, self.live_button):
+            button.setEnabled(connected and active)
+        for button in self.level_buttons:
+            button.setEnabled(connected and active)
+        self.stop_button.setEnabled(connected and active)
+
+        if presets:
+            root.addWidget(self._separator())
+            root.addWidget(QLabel("Gemeinsam starten"))
+            for preset in presets:
+                button = QPushButton(("⚠ " if preset.missing else "") + preset.label())
+                button.setToolTip(
+                    "Das Ziel ist in Boîte à Oublis nicht mehr vorhanden."
+                    if preset.missing else "Wortbank, Sozialform, Material und Timer gemeinsam starten"
+                )
+                button.setEnabled(connected)
+                button.clicked.connect(
+                    lambda checked=False, preset_id=preset.preset_id: self._preset(preset_id)
+                )
+                root.addWidget(button)
+
+        manage = QPushButton("Verbindung verwalten …")
+        manage.clicked.connect(self._manage)
+        root.addWidget(manage)
+
+    # ---- Aufbauhilfen
+    @staticmethod
+    def _headline(status) -> str:
+        if not getattr(status, "connected", False):
+            return "Boîte à Oublis ist nicht verbunden"
+        if not getattr(status, "active", False):
+            return "Verbunden – keine Projektion"
+        return getattr(status, "title", "") or "Projektion läuft"
+
+    @staticmethod
+    def _detail(status) -> str:
+        if not getattr(status, "connected", False):
+            return "Die App öffnen und die Verbindung dort bestätigen."
+        parts = []
+        group = getattr(status, "group", "")
+        if group:
+            parts.append(group)
+        pages = int(getattr(status, "pages", 0) or 0)
+        if pages:
+            parts.append(f"Seite {max(1, int(getattr(status, 'page', 0) or 0) + 1)} von {pages}")
+        if getattr(status, "blank", False):
+            parts.append("ausgeblendet")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _separator() -> QWidget:
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background: #3a424c;")
+        return line
+
+    def _action(self, action: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setIcon(QIcon(render_action_icon(action, 48, QColor("#ffffff"))))
+        button.setIconSize(QSize(30, 30))
+        button.setFixedSize(64, 44)
+        button.setToolTip(tooltip)
+        return button
+
+    # ---- Auslöser
+    def _send(self, name: str, args: dict | None = None) -> None:
+        self.commandRequested.emit(name, args or {})
+        self.accept()
+
+    def _live(self) -> None:
+        self.liveHelpRequested.emit()
+        self.accept()
+
+    def _open_app(self) -> None:
+        self.openAppRequested.emit()
+        self.accept()
+
+    def _preset(self, preset_id: str) -> None:
+        self.presetRequested.emit(preset_id)
+        self.accept()
+
+    def _manage(self) -> None:
+        self.manageRequested.emit()
         self.accept()
 
 

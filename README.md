@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/florianchristophnowak-dot/TeacherSoundboard?include_prereleases)](https://github.com/florianchristophnowak-dot/TeacherSoundboard/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Eine lokale Unterrichtshilfe: Soundboard-Leiste am Bildschirmrand und ein Panel für Sozialform, Material und Timer.
+Eine lokale Unterrichtshilfe: Soundboard-Leiste am Bildschirmrand und ein Panel für Sozialform, Material und Timer. Auf Wunsch steuert das Panel zusätzlich die Projektion von Boîte à Oublis – vollständig lokal, ohne Konto und ohne Internet.
 
 ## Download
 
@@ -50,6 +50,7 @@ Ohne diese Freigabe startet die App weiterhin stabil und ist per Mausklick sowie
 - `Escape`, `Leertaste` oder `S`: Wiedergabe stoppen
 - `Strg+M` (Windows) bzw. `Cmd+M` (macOS): Verwaltung öffnen
 - Globale Standard-Hotkeys: `F1`–`F8`; im Manager frei änderbar
+- Boîte-Kachel: Linksklick blendet die Sprachhilfe aus und ein, Rechtsklick öffnet die kompakte Steuerung
 
 ## Unterrichtspanel ab v4.5.0
 
@@ -57,12 +58,13 @@ Methode/Sozialform, Material und Timer stehen in einem eigenen Panel am rechten 
 
 Das Panel hat bewusst keine Hintergrundkarte, keine Trennlinien und keinerlei Schrift: Es stehen nur die farbigen Kacheln im Bild, getrennt allein durch Abstand und rechtsbündig zur Bildschirmkante angeordnet. Jede Kachel trägt ihre eigene Farbfläche, damit die Symbole ohne Rahmen auf hellem wie auf dunklem Bildschirminhalt lesbar bleiben.
 
-Alle vier Bestandteile sind einzeln zu- und abschaltbar, über das Kontextmenü unter *Anzeige* oder in der Verwaltung:
+Alle Bestandteile sind einzeln zu- und abschaltbar, über das Kontextmenü unter *Anzeige* oder in der Verwaltung:
 
 - Soundboard-Leiste: die Klangschaltflächen am gewählten Bildschirmrand
 - Methode oder Sozialform: Kachel anklicken und ein Symbol auswählen
 - Material: Kachel anklicken und beliebig viele Materialien aktivieren
 - Timer: Restzeit als schrumpfender Kreisausschnitt, darunter drei Schaltflächen für eine Minute weniger, Start/Pause und eine Minute mehr
+- Boîte à Oublis: Zustand und Steuerung der Sprachhilfe, sobald die Verbindung eingerichtet ist (siehe unten)
 
 Die Soundboard-Leiste selbst enthält nur noch Klänge und einen Symbolgriff, über den das Menü auch dann erreichbar bleibt, wenn alles andere ausgeblendet ist.
 
@@ -85,6 +87,54 @@ Ein ganzes Symbolblatt lässt sich in einem Zug in Einzeldateien zerlegen:
 ```bash
 python tools/slice_icon_sheet.py blatt.png --preview build/preview
 ```
+
+## Boîte à Oublis verbinden (Companion-Modus ab v4.6.0)
+
+Teacher Soundboard kann die Projektion von [Boîte à Oublis](https://github.com/florianchristophnowak-dot/boiteaoublis) fernsteuern: blättern, Unterstützungsstufe wechseln, aus- und einblenden, eine Live-Hilfe einwerfen. Beide Programme bleiben eigenständig – ohne das jeweils andere läuft alles unverändert weiter.
+
+Die Verbindung arbeitet **ausschließlich auf diesem Rechner**: ein kleiner Zugang auf `127.0.0.1`, kein Konto, kein Server, keine Internetverbindung. Übertragen werden nur festgelegte Steuerbefehle und ein kurzer Zustandsbericht (Titel, Lerngruppe, Unterstützungsstufe, Seitenzahl, sichtbar oder ausgeblendet). **Wortschatzdaten bleiben vollständig in Boîte à Oublis.**
+
+### Einrichten in drei Schritten
+
+1. Verwaltung öffnen (`Strg+M` bzw. `Cmd+M`) → Abschnitt **Boîte à Oublis (Companion-Modus)**.
+2. **Verbindung aktivieren** anhaken und mit **Datei wählen…** die portable Datei `dist/boite-a-oublis.html` auswählen.
+3. **Öffnen und verbinden** anklicken. Boîte à Oublis startet im Standardbrowser und meldet sich sofort an.
+
+Die Kopplung wird gespeichert und beim nächsten Start automatisch wiederhergestellt. Öffnet sich Boîte à Oublis später von Hand, genügt dort *Daten → Teacher Soundboard → Verbinden*; Teacher Soundboard fragt dann einmalig nach. Bricht die Verbindung ab, sucht Boîte à Oublis von selbst wieder – ein Neustart ist nie nötig. Steuern darf immer nur ein Fenster: Ein zweites übernimmt, das erste sagt sichtbar Bescheid.
+
+### Die Kachel im Panel
+
+Unter *Anzeige → Boîte à Oublis* erscheint eine weitere Kachel im Unterrichtspanel – schriftlos wie die übrigen. Ihr Zustand ist auf einen Blick erkennbar:
+
+| Kachel | Bedeutung |
+|---|---|
+| graue Leinwand, durchgestrichen | nicht verbunden |
+| blaue, leere Leinwand | verbunden, keine Projektion |
+| grüne Leinwand mit Zeilen | Sprachhilfe läuft; darunter zeigen ein, zwei oder drei Balken die Unterstützungsstufe |
+| dunkle Leinwand mit Rollo, grüner Rand | Projektion ausgeblendet |
+
+- **Linksklick:** aktuelle Sprachhilfe aus- oder wieder einblenden
+- **Rechtsklick:** kompakte Steuerung mit Blättern, Stufe 1/2/3, Live-Hilfe, Beenden, Boîte à Oublis öffnen und den gemeinsamen Presets
+
+### Gemeinsame Phasen-Presets
+
+Ein Preset startet eine Unterrichtsaktivität in beiden Programmen zugleich: eine Wortbank oder Tafel aus Boîte à Oublis mit ihrer Start-Unterstützungsstufe, dazu Sozialform, Material und Timerdauer im Soundboard, auf Wunsch mit sofortigem Timerstart.
+
+Angelegt werden Presets in der Verwaltung unter *Gemeinsame Phasen-Presets*. Zur Szene einer Wortbank („Partnergespräch“, „Diskussion“ …) schlägt Teacher Soundboard eine passende Sozialform vor; die Zuordnung ist frei änderbar und wird auf Wunsch für die nächste Wortbank derselben Szene gemerkt. Umbenannte Szenen führen nicht ins Leere: Der Vorschlag entsteht über Ähnlichkeit, nicht über einen starren Textvergleich.
+
+Gespeichert wird nur die Kennung des Ziels, dazu Titel und Lerngruppe als Beschriftung. Ist die Wortbank in Boîte à Oublis gelöscht, wird das Preset mit ⚠ als unvollständig markiert; der Unterrichtsteil wird dann nur nach ausdrücklicher Rückfrage angewendet.
+
+Eine Wortbank einfach zu öffnen ändert am Soundboard nichts: Timer, Material und Sozialform ändern sich ausschließlich, wenn ein Preset ausdrücklich gestartet wird.
+
+### Optionale globale Hotkeys
+
+Für Sprachhilfe ein/aus, Blättern und die Unterstützungsstufen lassen sich eigene globale Hotkeys vergeben – in der Verwaltung im Abschnitt der Verbindung. Sie sind von Haus aus **leer** und können deshalb nicht mit den Klang- und Stopp-Hotkeys kollidieren; eine doppelte Belegung wird beim Eintragen abgelehnt.
+
+### Wenn etwas nicht klappt
+
+- **Der Browser blockiert das Beamerfenster.** Ein eigenes Fenster darf ein Browser nur nach einem Klick öffnen. Kommt der Wunsch über die Verbindung, zeigt Boîte à Oublis die Projektion zunächst als Vollbild in seinem Fenster und bietet eine Schaltfläche für das Beamerfenster an. Dauerhaft hilft es, Pop-ups für die Seite zu erlauben.
+- **Kein freier Port.** Die Verbindung nutzt der Reihe nach `8317`, `8318` und `8319`. Sind alle drei belegt, meldet das die Verwaltung – Teacher Soundboard läuft normal weiter.
+- **Boîte à Oublis öffnet sich ohne Einladung.** Dann in der App unter *Daten* auf **Verbinden** klicken und die Rückfrage im Soundboard bestätigen.
 
 ## Zuverlässige Medienformate
 
@@ -109,6 +159,14 @@ Weitere Formate können funktionieren, hängen aber von den auf dem jeweiligen S
 - Schutz vor mehreren gleichzeitig laufenden Instanzen
 - robustere Videoanzeige und Neupositionierung bei Monitorwechseln
 - lokales Absturzprotokoll `TeacherSoundboard-crash.log`
+
+## Neu in v4.6.0
+
+- optionaler Companion-Modus: lokale Verbindung zu Boîte à Oublis über `127.0.0.1`
+- schriftlose Boîte-Kachel im Unterrichtspanel mit den Zuständen „getrennt“, „bereit“, „Sprachhilfe läuft“, „ausgeblendet“ und den Unterstützungsstufen 1–3
+- kompakte Steuerung für Blättern, Stufen, Live-Hilfe und Beenden
+- gemeinsame Phasen-Presets für Wortbank, Sozialform, Material und Timer
+- frei belegbare, standardmäßig leere globale Hotkeys für die Sprachhilfe
 
 ## Speicherorte
 
