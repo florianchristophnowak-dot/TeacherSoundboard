@@ -1,3 +1,4 @@
+import ast
 import json
 import tempfile
 import unittest
@@ -5,6 +6,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QPointF
 
+import classroom_modules
+import companion
 import soundboard
 from classroom_modules import (
     PhaseTimer, build_panel_layout, default_material_items, default_phase_items,
@@ -351,6 +354,176 @@ class PanelConfigTests(unittest.TestCase):
         self.assertEqual(soundboard.parse_config({"timer_sound_path": None}).timer_sound_path, "")
         kept = soundboard.parse_config({"timer_sound_path": "/tmp/gong.mp3"})
         self.assertEqual(kept.timer_sound_path, "/tmp/gong.mp3")
+
+
+class BoiteTileTests(unittest.TestCase):
+    """Die Kachel für Boîte à Oublis im Unterrichtspanel."""
+
+    def layout(self, **overrides):
+        options = dict(
+            unit=64,
+            show_phase=True,
+            show_materials=True,
+            show_timer=True,
+            phase_item=default_phase_items()[2],
+            material_items=default_material_items()[:2],
+        )
+        options.update(overrides)
+        return build_panel_layout(**options)
+
+    def kinds(self, layout):
+        return [region.kind for region in layout.regions]
+
+    def test_the_tile_is_off_unless_it_is_switched_on(self):
+        self.assertNotIn("boite", self.kinds(self.layout()))
+        self.assertIn("boite", self.kinds(self.layout(show_boite=True)))
+
+    def test_the_tile_stands_at_the_top_and_ends_at_the_same_edge(self):
+        layout = self.layout(show_boite=True)
+        self.assertEqual(self.kinds(layout)[0], "boite")
+        boite = layout.regions[0]
+        phase = next(r for r in layout.regions if r.kind == "phase")
+        self.assertAlmostEqual(boite.tile.right(), phase.tile.right(), places=3)
+        self.assertAlmostEqual(boite.tile.width(), phase.tile.width(), places=3)
+        self.assertLess(boite.rect.bottom(), phase.rect.top())
+
+    def test_the_tile_carries_its_state_and_no_text(self):
+        layout = self.layout(show_boite=True, boite_state="live", boite_level=3)
+        boite = layout.regions[0]
+        self.assertEqual(boite.state, "live")
+        self.assertEqual(boite.level, 3)
+        self.assertIsNone(boite.item)
+        self.assertFalse(hasattr(boite, "label"), "Beschriftungen sind nicht erwünscht")
+
+    def test_the_tile_alone_is_enough_for_a_panel(self):
+        layout = self.layout(
+            show_phase=False, show_materials=False, show_timer=False, show_boite=True
+        )
+        self.assertEqual(self.kinds(layout), ["boite"])
+        self.assertGreater(layout.height, 0)
+
+    def test_the_tile_can_be_hit_and_does_not_overlap(self):
+        layout = self.layout(show_boite=True)
+        boite = layout.regions[0]
+        self.assertIs(layout.region_at(boite.rect.center()), boite)
+        for other in layout.regions[1:]:
+            self.assertTrue(boite.rect.intersected(other.rect).isEmpty())
+
+    def test_every_state_of_the_status_has_a_drawing(self):
+        # Was der Zustandsbericht liefern kann, muss die Kachel auch zeichnen.
+        states = set()
+        for connected, active, blank in [
+            (False, False, False), (True, False, False), (True, True, False), (True, True, True),
+        ]:
+            states.add(companion.BoiteStatus(
+                connected=connected, active=active, blank=blank
+            ).tile_state())
+        self.assertEqual(states, set(classroom_modules.BOITE_COLORS))
+
+
+class CompanionConfigTests(unittest.TestCase):
+    def test_the_connection_is_off_in_a_fresh_configuration(self):
+        config = soundboard.parse_config({})
+        self.assertFalse(config.show_boite)
+        self.assertFalse(config.companion.enabled)
+        self.assertEqual(config.companion.app_path, "")
+        self.assertEqual(config.companion.presets, [])
+
+    def test_an_older_configuration_keeps_working(self):
+        config = soundboard.parse_config({"visible_buttons": 4, "show_timer": True})
+        self.assertFalse(config.show_boite)
+        self.assertFalse(config.companion.enabled)
+        self.assertTrue(config.show_timer)
+
+    def test_the_connection_survives_a_round_trip(self):
+        stored = {
+            "show_boite": True,
+            "companion": {
+                "enabled": True,
+                "app_path": "/tmp/dist/boite-a-oublis.html",
+                "tokens": ["abc"],
+                "scene_map": {"Partnergespräch": "phase-partner"},
+                "hotkeys": {"blank": "ctrl+alt+b"},
+                "presets": [{
+                    "preset_id": "p1", "name": "Am Markt", "target_kind": "bank",
+                    "target_id": "bnk_1", "target_title": "Au marché", "target_group": "9b",
+                    "level": 3, "phase_id": "phase-partner",
+                    "material_ids": ["material-book"], "timer_minutes": 8,
+                    "timer_autostart": True, "missing": False,
+                }],
+            },
+        }
+        config = soundboard.parse_config(stored)
+        self.assertTrue(config.show_boite)
+        self.assertEqual(config.companion.to_dict()["presets"], stored["companion"]["presets"])
+        self.assertEqual(config.companion.tokens, ["abc"])
+        self.assertEqual(config.companion.hotkeys, {"blank": "ctrl+alt+b"})
+
+    def test_a_damaged_connection_block_does_not_stop_the_program(self):
+        for broken in ("kaputt", 42, [], {"presets": "nein", "tokens": 5}):
+            config = soundboard.parse_config({"companion": broken})
+            self.assertFalse(config.companion.enabled)
+            self.assertEqual(config.companion.presets, [])
+
+    def test_companion_hotkeys_are_empty_by_default(self):
+        # Leer heißt: Es kann nichts mit den Klang- und Stopp-Hotkeys kollidieren.
+        config = soundboard.parse_config({})
+        self.assertEqual(config.companion.hotkeys, {})
+        for action in companion.HOTKEY_KEYS:
+            self.assertEqual(config.companion.hotkeys.get(action, ""), "")
+
+
+class PresetTriggerTests(unittest.TestCase):
+    """Ein Preset wirkt nur, wenn die Lehrkraft es ausdrücklich startet."""
+
+    @staticmethod
+    def callers_of(method: str) -> set[str]:
+        source = Path(soundboard.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        found = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == method:
+                    found.add(node.name)
+        return found
+
+    def test_the_lesson_part_is_applied_only_after_an_explicit_preset(self):
+        # Eine Wortbank zu öffnen darf Timer und Material nicht verändern:
+        # Der Unterrichtsteil hängt allein an der Antwort auf "preset.start".
+        # (check_companion_module ist der Selbsttest, kein Weg im Betrieb.)
+        self.assertEqual(
+            self.callers_of("_apply_preset_locally"),
+            {"_on_companion_result", "check_companion_module"},
+        )
+
+    def test_only_one_place_asks_boite_to_open_a_preset(self):
+        source = Path(soundboard.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        senders = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Call) or not inner.args:
+                    continue
+                first = inner.args[0]
+                if isinstance(first, ast.Constant) and first.value == "preset.start":
+                    senders.add(node.name)
+        self.assertEqual(senders, {"start_boite_preset"})
+
+    def test_a_status_report_carries_no_lesson_settings(self):
+        # Was Boîte à Oublis zurückmeldet, kann gar keine Sozialform, kein
+        # Material und keinen Timer enthalten.
+        status = companion.parse_status({
+            "kind": "bank", "active": True, "title": "Au marché",
+            "phase_id": "phase-group", "timer_minutes": 20,
+            "material_ids": ["material-book"],
+        })
+        self.assertFalse(hasattr(status, "phase_id"))
+        self.assertFalse(hasattr(status, "timer_minutes"))
+        self.assertFalse(hasattr(status, "material_ids"))
 
 
 class BarLayoutTests(unittest.TestCase):

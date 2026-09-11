@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import ctypes
 import json
 import os
 import math
 import platform
 import random
+import socket
 import struct
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import wave
 from dataclasses import dataclass, asdict, field
@@ -17,32 +20,34 @@ from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import (
-    PYQT_VERSION_STR, QT_VERSION_STR, QEvent, QLockFile, QPoint, QPointF,
-    QRectF, QTimer, QUrl, Qt, pyqtSignal,
+    PYQT_VERSION_STR, QT_VERSION_STR, QEvent, QLockFile, QObject, QPoint,
+    QPointF, QRectF, QTimer, QUrl, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QPixmap, QGuiApplication, QPainter, QPen, QBrush,
+    QAction, QPixmap, QGuiApplication, QDesktopServices, QPainter, QPen, QBrush,
     QRadialGradient, QColor, QFont, QPainterPath, QTransform, QKeySequence,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QLabel,
     QMenu, QHBoxLayout, QVBoxLayout, QMessageBox, QDialog, QGridLayout,
     QLineEdit, QPushButton, QFrame, QSlider, QComboBox, QSpinBox, QCheckBox,
-    QGroupBox, QScrollArea
+    QGroupBox, QScrollArea, QListWidget, QListWidgetItem, QDialogButtonBox
 )
 
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
+import companion
 from classroom_modules import (
-    CatalogEditorDialog, ClassroomPanel, IconPickerPopup, PhaseTimer,
-    TimerControlPopup, VisualItem, asset_icon_dir, default_material_items,
-    default_phase_items, paint_action_icon, parse_visual_items,
+    BoiteControlPopup, CatalogEditorDialog, ClassroomPanel, IconPickerPopup,
+    PhaseTimer, TimerControlPopup, VisualItem, asset_icon_dir,
+    default_material_items, default_phase_items, paint_action_icon,
+    parse_visual_items, render_boite_tile,
 )
 
 
 APP_NAME = "Teacher Soundboard"
-VERSION = "v4.5.0"
+VERSION = "v4.6.0"
 CONFIG_FILE = "soundboard_config.json"
 
 DEFAULT_BUTTONS = 6
@@ -173,6 +178,7 @@ class AppConfig:
     show_phase: bool = False
     show_materials: bool = False
     show_timer: bool = False
+    show_boite: bool = False
     phase_items: list[VisualItem] = field(default_factory=default_phase_items)
     material_items: list[VisualItem] = field(default_factory=default_material_items)
     selected_phase_id: str = ""
@@ -181,6 +187,7 @@ class AppConfig:
     timer_default_minutes: int = 5
     timer_sound_path: str = ""   # Klang, wenn die Zeit abgelaufen ist
     panel_y_ratio: float = 0.08   # senkrechte Lage des Panels am rechten Rand
+    companion: companion.CompanionConfig = field(default_factory=companion.CompanionConfig)
 
 
 def default_buttons() -> list[ButtonConfig]:
@@ -289,6 +296,7 @@ def parse_config(data) -> AppConfig:
         show_phase=config_bool("show_phase", False),
         show_materials=config_bool("show_materials", False),
         show_timer=config_bool("show_timer", False),
+        show_boite=config_bool("show_boite", False),
         phase_items=phase_items,
         material_items=material_items,
         selected_phase_id=selected_phase_id,
@@ -297,6 +305,7 @@ def parse_config(data) -> AppConfig:
         timer_default_minutes=_bounded_int(data.get("timer_default_minutes"), 5, 1, 999),
         timer_sound_path=str(data.get("timer_sound_path") or ""),
         panel_y_ratio=_bounded_float(data.get("panel_y_ratio"), 0.08, 0.0, 1.0),
+        companion=companion.parse_companion_config(data.get("companion")),
     )
 
 
@@ -453,6 +462,93 @@ class GlobalHotkeyManager:
                 self.start()
             else:
                 self.stop()
+
+
+# ---------------- Companion-Modus: Brücke zu Boîte à Oublis ----------------
+class CompanionBridge(QObject):
+    """Verbindet den Companion-Server mit der Benutzeroberfläche.
+
+    Der Server läuft in eigenen Fäden. Alles, was von dort kommt, wird über
+    Signale in den Oberflächen-Faden gereicht - ein Widget wird niemals von
+    außerhalb angefasst.
+    """
+
+    changed = pyqtSignal()                  # Kachel und Anzeige neu zeichnen
+    pairing = pyqtSignal(object)            # companion.PairingRequest
+    library = pyqtSignal(object)            # {"banks": [...], "boards": [...]}
+    tokensChanged = pyqtSignal(object)      # list[str]
+    commandFinished = pyqtSignal(str, str, bool, str)   # id, name, ok, Fehler
+
+    def __init__(self, tokens: list[str] | None = None, parent=None):
+        super().__init__(parent)
+        self.status = companion.BoiteStatus()
+        self.last_library: dict = {"banks": [], "boards": []}
+        self.server = companion.CompanionServer(
+            on_event=self._on_event, tokens=tokens or []
+        )
+        self.last_notice = ""
+
+    # ---- Lebenszyklus
+    def start(self) -> bool:
+        if self.server.running:
+            return True
+        port = self.server.start()
+        if not port:
+            self.last_notice = self.server.last_error
+        self.changed.emit()
+        return bool(port)
+
+    def stop(self) -> None:
+        self.server.stop()
+        self.status = companion.BoiteStatus()
+        self.changed.emit()
+
+    @property
+    def running(self) -> bool:
+        return self.server.running
+
+    @property
+    def connected(self) -> bool:
+        return self.server.connected and self.status.connected
+
+    @property
+    def port(self) -> int:
+        return self.server.port
+
+    # ---- Befehle
+    def send(self, name: str, args: dict | None = None) -> str:
+        return self.server.send_command(name, args)
+
+    def request_library(self) -> bool:
+        return bool(self.send("library.list"))
+
+    def issue_invite(self) -> str:
+        return self.server.issue_invite() if self.server.running else ""
+
+    # ---- Ereignisse aus dem Serverfaden
+    def _on_event(self, kind: str, payload: dict) -> None:
+        if kind == "connected":
+            self.status = companion.BoiteStatus(connected=True)
+            self.changed.emit()
+        elif kind == "disconnected":
+            self.status = companion.BoiteStatus()
+            self.changed.emit()
+        elif kind == "status":
+            self.status = payload["status"]
+            self.changed.emit()
+        elif kind == "tokens":
+            self.tokensChanged.emit(list(payload.get("tokens") or []))
+        elif kind == "pairing":
+            self.pairing.emit(payload["request"])
+        elif kind == "result":
+            data = payload.get("data") or {}
+            if payload.get("name") == "library.list" and payload.get("ok"):
+                self.last_library = companion.parse_library(data)
+                self.library.emit(self.last_library)
+            self.commandFinished.emit(
+                payload.get("id", ""), payload.get("name", ""),
+                bool(payload.get("ok")), payload.get("error", ""),
+            )
 
 
 # ---------------- Video Overlay (Safety) ----------------
@@ -804,6 +900,281 @@ class HotkeyEdit(QLineEdit):
 
 
 # ---------------- Manager UI ----------------
+class LiveHelpDialog(QDialog):
+    """Kleine Eingabe für eine spontane Sprachhilfe.
+
+    Ein lehrkraftbezogener Dialog: Beschriftungen sind hier ausdrücklich
+    erwünscht. Der Text wandert unverändert in die Projektion von
+    Boîte à Oublis; gespeichert wird er dort, nicht hier.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live-Hilfe einblenden")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        root = QVBoxLayout(self)
+
+        root.addWidget(QLabel("Ausdruck oder Satzanfang:"))
+        self.text_edit = QLineEdit()
+        self.text_edit.setPlaceholderText("z. B. Je me suis bien débrouillé(e).")
+        self.text_edit.setMinimumWidth(380)
+        root.addWidget(self.text_edit)
+
+        root.addWidget(QLabel("Deutsch (optional):"))
+        self.translation_edit = QLineEdit()
+        root.addWidget(self.translation_edit)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Art:"))
+        self.kind_combo = QComboBox()
+        self.kind_combo.addItem("Ausdruck / Wort", "word")
+        self.kind_combo.addItem("Satzanfang", "starter")
+        row.addWidget(self.kind_combo)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Einblenden")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        self.text_edit.setFocus()
+
+    def values(self) -> tuple[str, str, str]:
+        return (
+            self.text_edit.text().strip(),
+            self.translation_edit.text().strip(),
+            self.kind_combo.currentData() or "word",
+        )
+
+
+class PresetDialog(QDialog):
+    """Ein gemeinsames Preset: Wortbank plus Unterrichtsrahmen.
+
+    Boîte à Oublis bleibt die einzige Quelle für Wortschatzinhalte. Gespeichert
+    wird hier nur die Kennung des Ziels, dazu Titel und Lerngruppe als
+    Beschriftung, damit das Preset auch dann lesbar bleibt, wenn die App
+    gerade nicht läuft.
+    """
+
+    def __init__(self, host, preset_id: str = ""):
+        super().__init__(host)
+        self.host = host
+        self.preset = host.cfg.companion.preset(preset_id)
+        self.setWindowTitle("Preset bearbeiten" if self.preset else "Neues Preset")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.resize(520, 560)
+
+        root = QVBoxLayout(self)
+
+        root.addWidget(QLabel("Name (frei wählbar):"))
+        self.name_edit = QLineEdit(self.preset.name if self.preset else "")
+        root.addWidget(self.name_edit)
+
+        root.addWidget(QLabel("Wortbank oder Tafel aus Boîte à Oublis:"))
+        self.target_combo = QComboBox()
+        self.target_combo.currentIndexChanged.connect(self._target_changed)
+        root.addWidget(self.target_combo)
+
+        self.target_hint = QLabel("")
+        self.target_hint.setWordWrap(True)
+        self.target_hint.setStyleSheet("color: #666;")
+        root.addWidget(self.target_hint)
+
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Start-Unterstützungsstufe:"))
+        self.level_combo = QComboBox()
+        for level in (1, 2, 3):
+            self.level_combo.addItem(str(level), level)
+        self.level_combo.setCurrentIndex((self.preset.level if self.preset else 2) - 1)
+        level_row.addWidget(self.level_combo)
+        level_row.addStretch(1)
+        root.addLayout(level_row)
+
+        phase_row = QHBoxLayout()
+        phase_row.addWidget(QLabel("Sozialform / Methode:"))
+        self.phase_combo = QComboBox()
+        self.phase_combo.addItem("– keine –", "")
+        for item in host.cfg.phase_items:
+            self.phase_combo.addItem(item.name, item.item_id)
+        phase_row.addWidget(self.phase_combo, 1)
+        root.addLayout(phase_row)
+
+        self.remember_check = QCheckBox("Diese Zuordnung für die Szene merken")
+        self.remember_check.setToolTip(
+            "Beim nächsten Preset mit derselben Szene wird die Sozialform vorgeschlagen."
+        )
+        root.addWidget(self.remember_check)
+
+        root.addWidget(QLabel("Benötigte Materialien:"))
+        self.material_list = QListWidget()
+        self.material_list.setMaximumHeight(150)
+        for item in host.cfg.material_items:
+            entry = QListWidgetItem(item.name)
+            entry.setData(Qt.ItemDataRole.UserRole, item.item_id)
+            entry.setFlags(entry.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = bool(self.preset and item.item_id in self.preset.material_ids)
+            entry.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self.material_list.addItem(entry)
+        root.addWidget(self.material_list)
+
+        timer_row = QHBoxLayout()
+        timer_row.addWidget(QLabel("Timer (Minuten, 0 = keiner):"))
+        self.timer_spin = QSpinBox()
+        self.timer_spin.setRange(0, 999)
+        self.timer_spin.setValue(self.preset.timer_minutes if self.preset else 0)
+        timer_row.addWidget(self.timer_spin)
+        self.autostart_check = QCheckBox("Timer sofort starten")
+        self.autostart_check.setChecked(bool(self.preset and self.preset.timer_autostart))
+        timer_row.addWidget(self.autostart_check)
+        timer_row.addStretch(1)
+        root.addLayout(timer_row)
+
+        note = QLabel(
+            "Das Preset wird nur ausgelöst, wenn du es ausdrücklich startest. "
+            "Eine Wortbank in Boîte à Oublis zu öffnen ändert hier nichts."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666;")
+        root.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Speichern")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._fill_targets(host.companion.last_library)
+        host.companion.library.connect(self._fill_targets)
+        if host.companion.connected:
+            host.companion.request_library()
+
+    # ---- Ziele
+    def _fill_targets(self, library) -> None:
+        library = library or {"banks": [], "boards": []}
+        current = self.target_combo.currentData()
+        if current is None and self.preset:
+            current = (self.preset.target_kind, self.preset.target_id)
+
+        self.target_combo.blockSignals(True)
+        self.target_combo.clear()
+        found = False
+        for kind, key, label in (("bank", "banks", "Wortbank"), ("board", "boards", "Tafel")):
+            for entry in library.get(key, []):
+                title = entry["title"]
+                if entry.get("group"):
+                    title += " · " + entry["group"]
+                self.target_combo.addItem(f"{label}: {title}", (kind, entry["id"]))
+                self.target_combo.setItemData(
+                    self.target_combo.count() - 1, entry, Qt.ItemDataRole.UserRole + 1
+                )
+                if current and current == (kind, entry["id"]):
+                    found = True
+
+        if self.preset and not found:
+            # Ziel nicht (mehr) auffindbar: Es bleibt sichtbar und wird als
+            # unvollständig gekennzeichnet, statt stillschweigend zu wechseln.
+            label = self.preset.target_title or self.preset.target_id
+            self.target_combo.insertItem(
+                0, f"⚠ {label} – in Boîte à Oublis nicht gefunden",
+                (self.preset.target_kind, self.preset.target_id),
+            )
+        if not self.target_combo.count():
+            self.target_combo.addItem("– keine Verbindung zu Boîte à Oublis –", None)
+
+        index = self.target_combo.findData(current) if current else -1
+        self.target_combo.setCurrentIndex(max(0, index))
+        self.target_combo.blockSignals(False)
+        self._target_changed()
+
+    def _entry(self) -> dict:
+        data = self.target_combo.currentData(Qt.ItemDataRole.UserRole + 1)
+        return data if isinstance(data, dict) else {}
+
+    def _target_changed(self, *_args) -> None:
+        entry = self._entry()
+        scene = entry.get("scene", "")
+        if not self.target_combo.currentData():
+            self.target_hint.setText(
+                "Boîte à Oublis öffnen und verbinden, dann erscheinen hier alle "
+                "Wortbanken und Tafeln."
+            )
+            self.remember_check.setEnabled(False)
+            return
+
+        if entry:
+            if not self.name_edit.text().strip():
+                self.name_edit.setText(entry.get("title", ""))
+            suggested = companion.suggest_phase_for_scene(
+                scene, self.host.cfg.phase_items, self.host.cfg.companion.scene_map
+            )
+            wanted = self.preset.phase_id if (self.preset and self.preset.target_id == entry["id"]) else suggested
+            index = self.phase_combo.findData(wanted or "")
+            self.phase_combo.setCurrentIndex(max(0, index))
+            if entry.get("level") and not self.preset:
+                self.level_combo.setCurrentIndex(max(0, int(entry["level"]) - 1))
+
+        parts = []
+        if scene:
+            parts.append("Szene: " + scene)
+        if entry.get("group"):
+            parts.append("Lerngruppe: " + entry["group"])
+        self.target_hint.setText(" · ".join(parts) or "")
+        self.remember_check.setEnabled(bool(scene))
+        self.remember_check.setChecked(bool(scene))
+
+    # ---- Speichern
+    def _save(self) -> None:
+        target = self.target_combo.currentData()
+        if not target:
+            QMessageBox.information(
+                self, "Kein Ziel gewählt",
+                "Für ein gemeinsames Preset wird eine Wortbank oder Tafel aus "
+                "Boîte à Oublis gebraucht.",
+            )
+            return
+        kind, target_id = target
+        entry = self._entry()
+        material_ids = []
+        for index in range(self.material_list.count()):
+            item = self.material_list.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                material_ids.append(item.data(Qt.ItemDataRole.UserRole))
+
+        preset = self.preset or companion.Preset(preset_id=companion.new_preset_id())
+        preset.name = self.name_edit.text().strip()
+        preset.target_kind = kind
+        preset.target_id = target_id
+        preset.target_title = entry.get("title", preset.target_title)
+        preset.target_group = entry.get("group", preset.target_group)
+        preset.level = int(self.level_combo.currentData() or 2)
+        preset.phase_id = self.phase_combo.currentData() or ""
+        preset.material_ids = material_ids
+        preset.timer_minutes = int(self.timer_spin.value())
+        preset.timer_autostart = self.autostart_check.isChecked()
+        if entry:
+            preset.missing = False
+
+        scene = entry.get("scene", "")
+        if scene and self.remember_check.isChecked() and self.remember_check.isEnabled():
+            key = companion.normalize(scene)
+            if preset.phase_id:
+                self.host.cfg.companion.scene_map[key] = preset.phase_id
+            else:
+                self.host.cfg.companion.scene_map.pop(key, None)
+
+        if self.preset is None:
+            self.host.cfg.companion.presets.append(preset)
+        self.host.save_config()
+        self.accept()
+
+
 class ManageDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -984,6 +1355,105 @@ class ManageDialog(QDialog):
         sound_row.addWidget(self.clear_sound_button)
         classroom_box.addLayout(sound_row)
         root.addWidget(classroom_group)
+
+        # ---- Verbindung mit Boîte à Oublis ----
+        companion_group = QGroupBox("Boîte à Oublis (Companion-Modus)")
+        companion_box = QVBoxLayout(companion_group)
+
+        intro = QLabel(
+            "Verbindet Teacher Soundboard mit der Tafel-App auf demselben Rechner – "
+            "ausschließlich lokal über 127.0.0.1, ohne Konto, Server oder Internet. "
+            "Wortschatzdaten bleiben in Boîte à Oublis."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #666;")
+        companion_box.addWidget(intro)
+
+        connect_row = QHBoxLayout()
+        self.companion_check = QCheckBox("Verbindung aktivieren")
+        self.companion_check.setToolTip(
+            "Öffnet einen lokalen Zugang auf 127.0.0.1, zu dem sich Boîte à Oublis "
+            "verbinden darf. Ohne Häkchen wird nichts geöffnet."
+        )
+        self.companion_check.stateChanged.connect(self._on_companion_toggled)
+        connect_row.addWidget(self.companion_check)
+
+        self.companion_tile_check = QCheckBox("Kachel im Panel anzeigen")
+        self.companion_tile_check.stateChanged.connect(
+            lambda state: self._on_module_changed("boite", state)
+        )
+        connect_row.addWidget(self.companion_tile_check)
+        connect_row.addStretch(1)
+        companion_box.addLayout(connect_row)
+
+        self.companion_status_label = QLabel("")
+        self.companion_status_label.setWordWrap(True)
+        companion_box.addWidget(self.companion_status_label)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Portable Datei:"))
+        self.companion_path_edit = QLineEdit()
+        self.companion_path_edit.setReadOnly(True)
+        self.companion_path_edit.setPlaceholderText("… /dist/boite-a-oublis.html")
+        path_row.addWidget(self.companion_path_edit, 1)
+        choose_boite = QPushButton("Datei wählen…")
+        choose_boite.clicked.connect(self.host.choose_boite_file)
+        path_row.addWidget(choose_boite)
+        open_boite = QPushButton("Öffnen und verbinden")
+        open_boite.setToolTip(
+            "Öffnet Boîte à Oublis im Standardbrowser und übergibt eine einmalige Einladung."
+        )
+        open_boite.clicked.connect(self.host.open_boite_app)
+        path_row.addWidget(open_boite)
+        companion_box.addLayout(path_row)
+
+        hotkey_box = QGroupBox("Optionale globale Hotkeys (leer = nicht vergeben)")
+        hotkey_grid = QGridLayout(hotkey_box)
+        self.companion_hotkeys: dict[str, HotkeyEdit] = {}
+        for index, (action, label) in enumerate(companion.HOTKEY_ACTIONS):
+            hotkey_grid.addWidget(QLabel(label + ":"), index // 3, (index % 3) * 2)
+            edit = HotkeyEdit()
+            edit.setFixedWidth(130)
+            edit.hotkeyChanged.connect(
+                lambda hotkey, name=action: self._on_companion_hotkey_changed(name, hotkey)
+            )
+            hotkey_grid.addWidget(edit, index // 3, (index % 3) * 2 + 1)
+            self.companion_hotkeys[action] = edit
+        companion_box.addWidget(hotkey_box)
+
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Gemeinsame Phasen-Presets:"))
+        preset_row.addStretch(1)
+        companion_box.addLayout(preset_row)
+
+        self.preset_list = QListWidget()
+        self.preset_list.setMaximumHeight(130)
+        self.preset_list.itemDoubleClicked.connect(
+            lambda item: self.host.open_preset_editor(item.data(Qt.ItemDataRole.UserRole))
+        )
+        companion_box.addWidget(self.preset_list)
+
+        preset_buttons = QHBoxLayout()
+        new_preset = QPushButton("Neues Preset…")
+        new_preset.clicked.connect(lambda: self.host.open_preset_editor(""))
+        preset_buttons.addWidget(new_preset)
+        edit_preset = QPushButton("Bearbeiten…")
+        edit_preset.clicked.connect(self._edit_selected_preset)
+        preset_buttons.addWidget(edit_preset)
+        remove_preset = QPushButton("Entfernen")
+        remove_preset.clicked.connect(self._remove_selected_preset)
+        preset_buttons.addWidget(remove_preset)
+        start_preset = QPushButton("Gemeinsam starten")
+        start_preset.setToolTip(
+            "Öffnet die Wortbank in Boîte à Oublis und setzt hier Sozialform, "
+            "Material und Timer."
+        )
+        start_preset.clicked.connect(self._start_selected_preset)
+        preset_buttons.addWidget(start_preset)
+        preset_buttons.addStretch(1)
+        companion_box.addLayout(preset_buttons)
+
+        root.addWidget(companion_group)
 
         line2 = QFrame()
         line2.setFrameShape(QFrame.Shape.HLine)
@@ -1175,6 +1645,84 @@ class ManageDialog(QDialog):
                 self.status_labels[i].setText("versteckt")
                 self.status_labels[i].setStyleSheet("color: #888;")
 
+        self.refresh_companion()
+
+    # ---- Boîte à Oublis
+    def refresh_companion(self):
+        """Zeigt Verbindung, Datei, Hotkeys und Presets im aktuellen Stand."""
+        settings = self.host.cfg.companion
+        self.companion_check.blockSignals(True)
+        self.companion_check.setChecked(settings.enabled)
+        self.companion_check.blockSignals(False)
+
+        self.companion_tile_check.blockSignals(True)
+        self.companion_tile_check.setChecked(self.host.cfg.show_boite)
+        self.companion_tile_check.blockSignals(False)
+
+        status_text, status_ok = self.host.companion_status_text()
+        self.companion_status_label.setText(status_text)
+        self.companion_status_label.setStyleSheet(
+            "color: #176b35; font-weight: 600;" if status_ok else "color: #9a4d00; font-weight: 600;"
+        )
+
+        path = settings.app_path
+        self.companion_path_edit.setText(short_path(path) if path else "")
+        self.companion_path_edit.setToolTip(path)
+
+        for action, edit in self.companion_hotkeys.items():
+            edit.setHotkey(settings.hotkeys.get(action, ""))
+
+        selected = self.preset_list.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else ""
+        self.preset_list.clear()
+        for preset in settings.presets:
+            parts = [preset.label()]
+            if preset.target_group:
+                parts.append(preset.target_group)
+            parts.append("Stufe " + str(preset.level))
+            if preset.timer_minutes:
+                parts.append(f"{preset.timer_minutes} min"
+                             + (" (startet sofort)" if preset.timer_autostart else ""))
+            text = " · ".join(parts)
+            item = QListWidgetItem(("⚠ " if preset.missing else "") + text)
+            if preset.missing:
+                item.setToolTip(
+                    "Das Ziel ist in Boîte à Oublis nicht mehr vorhanden. "
+                    "Bearbeiten und ein neues Ziel wählen."
+                )
+            item.setData(Qt.ItemDataRole.UserRole, preset.preset_id)
+            self.preset_list.addItem(item)
+            if preset.preset_id == selected_id:
+                self.preset_list.setCurrentItem(item)
+
+    def _selected_preset_id(self) -> str:
+        item = self.preset_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+
+    def _edit_selected_preset(self):
+        preset_id = self._selected_preset_id()
+        if preset_id:
+            self.host.open_preset_editor(preset_id)
+
+    def _remove_selected_preset(self):
+        preset_id = self._selected_preset_id()
+        if preset_id:
+            self.host.remove_preset(preset_id)
+
+    def _start_selected_preset(self):
+        preset_id = self._selected_preset_id()
+        if preset_id:
+            self.host.start_boite_preset(preset_id)
+
+    def _on_companion_toggled(self, state):
+        self.host.set_companion_enabled(bool(state))
+
+    def _on_companion_hotkey_changed(self, action: str, hotkey: str):
+        if not self.host.set_companion_hotkey(action, hotkey):
+            self.companion_hotkeys[action].setHotkey(
+                self.host.cfg.companion.hotkeys.get(action, "")
+            )
+
     def _on_volume_changed(self, value: int):
         self.vol_label.setText(f"{value}%")
         self.host.set_volume(value / 100.0)
@@ -1286,6 +1834,7 @@ class SoundboardWindow(QMainWindow):
     # Signal for thread-safe hotkey triggering
     hotkeyTriggered = pyqtSignal(int)
     stopTriggered = pyqtSignal()
+    companionTriggered = pyqtSignal(str)
     
     def __init__(self):
         super().__init__()
@@ -1354,10 +1903,23 @@ class SoundboardWindow(QMainWindow):
 
         self.manager_dialog: ManageDialog | None = None
 
+        # Companion-Modus: lokale Verbindung zu Boîte à Oublis
+        self._boite_popup: BoiteControlPopup | None = None
+        self._preset_commands: dict[str, str] = {}
+        self.companion = CompanionBridge(self.cfg.companion.tokens, self)
+        self.companion.changed.connect(self._on_companion_changed)
+        self.companion.pairing.connect(self._on_companion_pairing)
+        self.companion.tokensChanged.connect(self._on_companion_tokens)
+        self.companion.commandFinished.connect(self._on_companion_result)
+        if self.cfg.companion.enabled:
+            # Scheitert das Binden, läuft alles Übrige unverändert weiter.
+            self.companion.start()
+
         # Global hotkey manager
         self.hotkey_manager = GlobalHotkeyManager()
         self.hotkeyTriggered.connect(self._on_hotkey_triggered)
         self.stopTriggered.connect(self.stop_playback)
+        self.companionTriggered.connect(self._on_companion_hotkey)
         
         # Setup hotkeys
         self._setup_global_hotkeys()
@@ -1414,6 +1976,19 @@ class SoundboardWindow(QMainWindow):
             )
             if not registered:
                 registration_error = self.hotkey_manager.last_error
+
+        # Companion-Hotkeys sind frei belegbar und standardmäßig leer, damit
+        # sie mit den Klang- und Stopp-Hotkeys nicht kollidieren können.
+        if self.cfg.companion.enabled:
+            for action in companion.HOTKEY_KEYS:
+                hotkey = self.cfg.companion.hotkeys.get(action, "")
+                if not hotkey:
+                    continue
+                registered = self.hotkey_manager.register(
+                    hotkey, lambda name=action: self.companionTriggered.emit(name)
+                )
+                if not registered:
+                    registration_error = self.hotkey_manager.last_error
         
         started = self.hotkey_manager.start()
         if started and registration_error:
@@ -1599,6 +2174,7 @@ class SoundboardWindow(QMainWindow):
             "show_phase": self.cfg.show_phase,
             "show_materials": self.cfg.show_materials,
             "show_timer": self.cfg.show_timer,
+            "show_boite": self.cfg.show_boite,
             "phase_items": [item.to_dict() for item in self.cfg.phase_items],
             "material_items": [item.to_dict() for item in self.cfg.material_items],
             "selected_phase_id": self.cfg.selected_phase_id,
@@ -1607,6 +2183,7 @@ class SoundboardWindow(QMainWindow):
             "timer_default_minutes": self.cfg.timer_default_minutes,
             "timer_sound_path": self.cfg.timer_sound_path,
             "panel_y_ratio": self.cfg.panel_y_ratio,
+            "companion": self.cfg.companion.to_dict(),
         }
         try:
             atomic_write_json(self.config_path, data)
@@ -1846,10 +2423,14 @@ class SoundboardWindow(QMainWindow):
             "phase": "show_phase",
             "materials": "show_materials",
             "timer": "show_timer",
+            "boite": "show_boite",
         }.get(module)
         if not field_name:
             return
         setattr(self.cfg, field_name, bool(visible))
+        # Die Kachel ohne eingeschaltete Verbindung wäre dauerhaft grau.
+        if module == "boite" and visible and not self.cfg.companion.enabled:
+            self.set_companion_enabled(True)
         self._refresh_module_layout()
 
 
@@ -2098,6 +2679,333 @@ class SoundboardWindow(QMainWindow):
             ]
         self._refresh_module_layout()
 
+    # ---- Companion-Modus (Boîte à Oublis)
+    def boite_tile_state(self) -> tuple[str, int]:
+        """Zustand und Unterstützungsstufe für die Kachel im Panel."""
+        bridge = getattr(self, "companion", None)
+        if bridge is None or not self.cfg.companion.enabled or not bridge.connected:
+            return "offline", 0
+        status = bridge.status
+        return status.tile_state(), status.level
+
+    def companion_status_text(self) -> tuple[str, bool]:
+        """Verständliche Statuszeile für die Verwaltung."""
+        bridge = getattr(self, "companion", None)
+        if bridge is None or not self.cfg.companion.enabled:
+            return "Die Verbindung ist ausgeschaltet.", True
+        if not bridge.running:
+            detail = bridge.last_notice or "Der lokale Port konnte nicht geöffnet werden."
+            return detail, False
+        if not bridge.connected:
+            return (
+                f"Bereit auf 127.0.0.1:{bridge.port} – warte auf Boîte à Oublis.",
+                True,
+            )
+        status = bridge.status
+        if not status.active:
+            return "Verbunden. Es läuft noch keine Projektion.", True
+        where = status.title or "Projektion"
+        if status.group:
+            where += " · " + status.group
+        return f"Verbunden: {where}", True
+
+    def set_companion_enabled(self, enabled: bool) -> None:
+        self.cfg.companion.enabled = bool(enabled)
+        self.save_config()
+        if self.cfg.companion.enabled:
+            if not self.companion.start():
+                QMessageBox.information(
+                    self,
+                    "Verbindung nicht möglich",
+                    "Es war kein lokaler Port frei. Teacher Soundboard läuft normal weiter; "
+                    "die Verbindung lässt sich später erneut einschalten.\n\n"
+                    + (self.companion.last_notice or ""),
+                )
+        else:
+            self.companion.stop()
+        self._setup_global_hotkeys()
+        self._refresh_views()
+        if self.manager_dialog:
+            self.manager_dialog.refresh()
+
+    def _on_companion_changed(self) -> None:
+        # Es ändert sich nur die Kachel: neu rechnen, aber nicht verschieben.
+        self.panel.relayout(reposition=False)
+        if self.manager_dialog:
+            self.manager_dialog.refresh_companion()
+
+    def _on_companion_pairing(self, request) -> None:
+        """Einmalige Freigabe, wenn ein Fenster ohne Einladung anklopft."""
+        answer = QMessageBox.question(
+            self,
+            "Boîte à Oublis verbinden?",
+            f"„{request.client_name}“ möchte sich auf diesem Rechner mit Teacher Soundboard "
+            "verbinden und die Projektion steuern.\n\n"
+            f"Kennung dieser Anfrage: {request.code}\n\n"
+            "Nur zulassen, wenn du Boîte à Oublis gerade selbst geöffnet hast.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            request.approve()
+        else:
+            request.reject()
+
+    def _on_companion_tokens(self, tokens) -> None:
+        self.cfg.companion.tokens = [str(token) for token in tokens]
+        self.save_config()
+
+    def _on_companion_result(self, command_id: str, name: str, ok: bool, error: str) -> None:
+        preset_id = self._preset_commands.pop(command_id, "")
+        if not preset_id:
+            return
+        preset = self.cfg.companion.preset(preset_id)
+        if preset is None:
+            return
+        if ok:
+            if preset.missing:
+                preset.missing = False
+                self.save_config()
+            self._apply_preset_locally(preset)
+            return
+
+        # Das Ziel ist weg oder nicht mehr erreichbar: Der Unterrichtsteil
+        # wird deshalb nicht stillschweigend angewendet.
+        preset.missing = error == "not-found"
+        self.save_config()
+        answer = QMessageBox.question(
+            self,
+            "Preset unvollständig",
+            f"„{preset.label()}“ konnte in Boîte à Oublis nicht geöffnet werden.\n\n"
+            + ("Die Wortbank oder Tafel gibt es dort nicht mehr."
+               if preset.missing else f"Rückmeldung: {error or 'unbekannter Fehler'}")
+            + "\n\nSoll trotzdem nur der Unterrichtsteil (Sozialform, Material, Timer) "
+              "angewendet werden?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._apply_preset_locally(preset)
+        if self.manager_dialog:
+            self.manager_dialog.refresh_companion()
+
+    def send_boite_command(self, name: str, args: dict | None = None) -> bool:
+        if not self.cfg.companion.enabled:
+            return False
+        return bool(self.companion.send(name, args))
+
+    def toggle_boite_blank(self, global_pos: QPoint | None = None) -> None:
+        """Ein Klick auf die Kachel blendet die Sprachhilfe aus oder ein."""
+        status = self.companion.status
+        if not self.companion.connected or not status.active:
+            if global_pos is not None:
+                self.open_boite_controls(global_pos)
+            return
+        self.send_boite_command("blank.toggle")
+
+    def open_boite_controls(self, global_pos: QPoint) -> None:
+        popup = BoiteControlPopup(
+            self.companion.status if self.companion.connected else companion.BoiteStatus(),
+            self.cfg.companion.presets,
+            parent=self,
+        )
+        popup.commandRequested.connect(self.send_boite_command)
+        popup.liveHelpRequested.connect(self.open_boite_live_help)
+        popup.openAppRequested.connect(self.open_boite_app)
+        popup.presetRequested.connect(self.start_boite_preset)
+        popup.manageRequested.connect(self.open_manager)
+        self._boite_popup = popup
+        self._position_popup(popup, global_pos)
+        popup.show()
+
+    def open_boite_live_help(self) -> None:
+        dialog = LiveHelpDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        text, translation, kind = dialog.values()
+        if not text:
+            return
+        if not self.send_boite_command(
+            "live.add", {"text": text, "translation": translation, "kind": kind}
+        ):
+            QMessageBox.information(
+                self, "Keine Verbindung",
+                "Die Live-Hilfe konnte nicht übertragen werden, weil Boîte à Oublis "
+                "gerade nicht verbunden ist.",
+            )
+
+    def choose_boite_file(self) -> str:
+        start = self.cfg.companion.app_path or str(Path.home())
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Boîte à Oublis auswählen (dist/boite-a-oublis.html)",
+            start, "Boîte à Oublis (*.html *.htm)",
+        )
+        if not path:
+            return ""
+        self.cfg.companion.app_path = path
+        self.save_config()
+        if self.manager_dialog:
+            self.manager_dialog.refresh_companion()
+        return path
+
+    def open_boite_app(self) -> bool:
+        """Öffnet die portable Datei - mit Einladung, sofern möglich."""
+        path = self.cfg.companion.app_path
+        if not path or not Path(path).is_file():
+            path = self.choose_boite_file()
+        if not path:
+            return False
+
+        if not self.cfg.companion.enabled:
+            self.set_companion_enabled(True)
+        elif not self.companion.running:
+            self.companion.start()
+
+        invite = self.companion.issue_invite()
+        url = companion.invitation_url(path, self.companion.port, invite)
+        if QDesktopServices.openUrl(QUrl(url)):
+            return True
+
+        # Manche Systeme reichen eine Datei mit Textanker nicht an den Browser
+        # weiter. Dann wird die Datei schlicht geöffnet und die Verbindung in
+        # Boîte à Oublis selbst bestätigt.
+        if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+            QMessageBox.information(
+                self, "Boîte à Oublis geöffnet",
+                "Die App wurde geöffnet, konnte aber keine Einladung mitbekommen.\n\n"
+                "Dort unter „Daten → Teacher Soundboard“ auf „Verbinden“ klicken; "
+                "Teacher Soundboard fragt dann einmalig nach.",
+            )
+            return True
+        QMessageBox.warning(
+            self, "Öffnen nicht möglich",
+            f"Die Datei konnte nicht geöffnet werden:\n{path}",
+        )
+        return False
+
+    def start_boite_preset(self, preset_id: str) -> None:
+        """Startet eine Unterrichtsaktivität in beiden Programmen."""
+        preset = self.cfg.companion.preset(preset_id)
+        if preset is None:
+            return
+        if not self.companion.connected:
+            answer = QMessageBox.question(
+                self, "Boîte à Oublis ist nicht verbunden",
+                f"„{preset.label()}“ braucht Boîte à Oublis.\n\nJetzt öffnen?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.open_boite_app()
+            return
+
+        command_id = self.companion.send("preset.start", {
+            "id": preset.target_id,
+            "kind": preset.target_kind,
+            "level": preset.level,
+        })
+        if not command_id:
+            QMessageBox.information(
+                self, "Nicht gestartet",
+                "Der Befehl konnte nicht übertragen werden. Ist Boîte à Oublis noch offen?",
+            )
+            return
+        self._preset_commands[command_id] = preset.preset_id
+
+    def _apply_preset_locally(self, preset) -> None:
+        """Wendet den Unterrichtsteil eines Presets an - nur auf Wunsch."""
+        changed = False
+        phase_ids = {item.item_id for item in self.cfg.phase_items}
+        if preset.phase_id and preset.phase_id in phase_ids:
+            self.cfg.selected_phase_id = preset.phase_id
+            self.cfg.show_phase = True
+            changed = True
+
+        material_ids = {item.item_id for item in self.cfg.material_items}
+        wanted = [item_id for item_id in preset.material_ids if item_id in material_ids]
+        if wanted:
+            self.cfg.selected_material_ids = wanted
+            self.cfg.show_materials = True
+            changed = True
+
+        if preset.timer_minutes > 0:
+            self.cfg.timer_default_minutes = preset.timer_minutes
+            self.cfg.show_timer = True
+            changed = True
+            if preset.timer_autostart:
+                self.start_phase_timer(preset.timer_minutes)
+
+        if changed:
+            self._refresh_module_layout()
+
+    def open_preset_editor(self, preset_id: str = "") -> None:
+        dialog = PresetDialog(self, preset_id)
+        dialog.exec()
+        if self.manager_dialog:
+            self.manager_dialog.refresh_companion()
+
+    def remove_preset(self, preset_id: str) -> None:
+        presets = self.cfg.companion.presets
+        self.cfg.companion.presets = [p for p in presets if p.preset_id != preset_id]
+        if len(self.cfg.companion.presets) != len(presets):
+            self.save_config()
+        if self.manager_dialog:
+            self.manager_dialog.refresh_companion()
+
+    def hotkey_conflict(self, hotkey: str, ignore_action: str = "") -> str:
+        """Nennt die Stelle, an der ein Hotkey schon vergeben ist."""
+        if not hotkey:
+            return ""
+        manager = self.hotkey_manager
+        wanted = manager._normalize_hotkey(hotkey)
+        if not wanted:
+            return ""
+        for index, button in enumerate(self.cfg.buttons[:self.visible_count()]):
+            if button.hotkey and manager._normalize_hotkey(button.hotkey) == wanted:
+                return f"Klang {index + 1}"
+        if self.cfg.stop_hotkey and manager._normalize_hotkey(self.cfg.stop_hotkey) == wanted:
+            return "Stopp"
+        labels = dict(companion.HOTKEY_ACTIONS)
+        for action, existing in self.cfg.companion.hotkeys.items():
+            if action == ignore_action or not existing:
+                continue
+            if manager._normalize_hotkey(existing) == wanted:
+                return labels.get(action, action)
+        return ""
+
+    def set_companion_hotkey(self, action: str, hotkey: str) -> bool:
+        if action not in companion.HOTKEY_KEYS:
+            return False
+        conflict = self.hotkey_conflict(hotkey, ignore_action=action)
+        if conflict:
+            QMessageBox.information(
+                self, "Hotkey bereits vergeben",
+                f"„{hotkey}“ wird schon für {conflict} verwendet. "
+                "Bitte eine andere Tastenkombination wählen.",
+            )
+            return False
+        if hotkey:
+            self.cfg.companion.hotkeys[action] = hotkey
+        else:
+            self.cfg.companion.hotkeys.pop(action, None)
+        self.save_config()
+        self._setup_global_hotkeys()
+        return True
+
+    def _on_companion_hotkey(self, action: str) -> None:
+        if action == "blank":
+            self.toggle_boite_blank()
+        elif action == "next":
+            self.send_boite_command("page.next")
+        elif action == "prev":
+            self.send_boite_command("page.prev")
+        elif action.startswith("level_"):
+            try:
+                level = int(action.rsplit("_", 1)[1])
+            except (IndexError, ValueError):
+                return
+            self.send_boite_command("level.set", {"level": level})
+
     # ---- Manager
     def open_manager(self):
         if self.manager_dialog is None:
@@ -2140,6 +3048,7 @@ class SoundboardWindow(QMainWindow):
             ("phase", "Methode/Sozialform", self.cfg.show_phase),
             ("materials", "Material", self.cfg.show_materials),
             ("timer", "Timer", self.cfg.show_timer),
+            ("boite", "Boîte à Oublis", self.cfg.show_boite),
         ]
         for key, label, visible in modules:
             action = QAction(label, self)
@@ -2442,6 +3351,7 @@ class SoundboardWindow(QMainWindow):
         """Clean up when closing."""
         self._module_tick.stop()
         self.hotkey_manager.stop()
+        self.companion.stop()
         self.player.stop()
         self._release_timer_sound()
         self.video_overlay.close()
@@ -2450,6 +3360,8 @@ class SoundboardWindow(QMainWindow):
             self._picker_popup.close()
         if self._timer_popup:
             self._timer_popup.close()
+        if self._boite_popup:
+            self._boite_popup.close()
         for dialog in self._catalog_dialogs.values():
             dialog.close()
         if self.manager_dialog:
@@ -2483,6 +3395,165 @@ def install_exception_handler():
             )
 
     sys.excepthook = handle_exception
+
+
+def check_companion_module(window: "SoundboardWindow", app: QApplication) -> int:
+    """Prüft den Companion-Modus im fertigen Paket.
+
+    Ein echter Handschlag auf 127.0.0.1 mit einem winzigen, hier gebauten
+    Client: Damit ist belegt, dass Server, Kachel und Steuerung auch in der
+    gepackten Anwendung vorhanden und lauffähig sind.
+    """
+    window.cfg.show_boite = True
+    window.cfg.companion.enabled = True
+    # Im Selbsttest darf notfalls das System einen Port vergeben: Auf einem
+    # Prüfrechner können die gewohnten drei belegt sein.
+    window.companion.server.ports = companion.PORTS + (0,)
+    window.companion.start()
+    port = window.companion.port
+    if not port:
+        raise RuntimeError(f"Companion server did not bind: {window.companion.last_notice}")
+
+    window._refresh_module_layout(persist=False)
+    app.processEvents()
+    kinds = {region.kind for region in (window.panel.layout_data.regions if window.panel.layout_data else [])}
+    if "boite" not in kinds:
+        raise RuntimeError("Boîte tile missing from the classroom panel")
+    if window.boite_tile_state() != ("offline", 0):
+        raise RuntimeError(f"Unexpected tile state: {window.boite_tile_state()}")
+
+    invite = window.companion.issue_invite()
+    connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        connection.sendall((
+            "GET /companion HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\nOrigin: null\r\n\r\n"
+        ).encode("ascii"))
+        response = connection.recv(4096)
+        if b" 101 " not in response:
+            raise RuntimeError(f"WebSocket handshake failed: {response[:60]!r}")
+
+        hello = companion.build("hello", client={
+            "app": companion.CLIENT_APP, "name": "Selbsttest", "version": VERSION,
+        }, invite=invite).encode("utf-8")
+        mask = os.urandom(4)
+        header = bytearray([0x81, 0x80 | len(hello)]) if len(hello) < 126 else bytearray(
+            [0x81, 0x80 | 126]) + bytearray(struct.pack(">H", len(hello)))
+        connection.sendall(bytes(header) + mask
+                           + bytes(b ^ mask[i % 4] for i, b in enumerate(hello)))
+
+        reader = companion.FrameReader(require_mask=False)
+        welcome = None
+        deadline = time.monotonic() + 5.0
+        while welcome is None and time.monotonic() < deadline:
+            for opcode, payload in reader.feed(connection.recv(4096)):
+                if opcode != companion.OPCODE_TEXT:
+                    continue
+                message = companion.parse_message(payload, allowed=("welcome", "denied"))
+                if message and message.get("type") == "welcome":
+                    welcome = message
+        if not welcome or welcome.get("app") != companion.SERVER_APP:
+            raise RuntimeError("Companion handshake did not produce a welcome")
+
+        deadline = time.monotonic() + 5.0
+        while not window.companion.server.connected and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        if not window.companion.server.connected:
+            raise RuntimeError("Companion server did not register the client")
+        if not window.companion.send("level.set", {"level": 2}):
+            raise RuntimeError("An allowed command was not delivered")
+        if window.companion.send("shell.exec", {"cmd": "rm"}):
+            raise RuntimeError("An unknown command was delivered")
+    finally:
+        connection.close()
+
+    # Kachel, Steuerung und Preset dürfen auch offline nicht scheitern.
+    for state in ("offline", "ready", "live", "blank"):
+        if render_boite_tile(state, 2, 48).isNull():
+            raise RuntimeError(f"Boîte tile did not render: {state}")
+    popup = BoiteControlPopup(window.companion.status, window.cfg.companion.presets, parent=window)
+    popup.show()
+    app.processEvents()
+    if popup.grab().isNull():
+        raise RuntimeError("Boîte control popup did not render")
+    popup.close()
+
+    # Verwaltung, Preset-Dialog und Live-Hilfe müssen sich aufbauen lassen.
+    window.open_manager()
+    app.processEvents()
+    window.manager_dialog.refresh_companion()
+    if window.manager_dialog.preset_list is None:
+        raise RuntimeError("Preset list missing from the manager")
+    live_dialog = LiveHelpDialog(window)
+    live_dialog.show()
+    app.processEvents()
+    if live_dialog.grab().isNull():
+        raise RuntimeError("LiveHelpDialog did not render")
+    live_dialog.reject()
+
+    # Ein Preset entsteht aus der Liste, die Boîte à Oublis meldet.
+    window.companion.last_library = {
+        "banks": [{
+            "id": "bnk_selftest", "title": "Au marché", "group": "9b",
+            "subject": "Französisch", "scene": "Partnergespräch", "level": "2",
+        }],
+        "boards": [],
+    }
+    editor = PresetDialog(window, "")
+    editor.show()
+    app.processEvents()
+    if editor.grab().isNull():
+        raise RuntimeError("PresetDialog did not render")
+    if editor.target_combo.currentData() != ("bank", "bnk_selftest"):
+        raise RuntimeError(f"Preset target not offered: {editor.target_combo.currentData()}")
+    if editor.phase_combo.currentData() != "phase-partner":
+        raise RuntimeError(f"Scene did not suggest a social form: {editor.phase_combo.currentData()}")
+    editor.timer_spin.setValue(8)
+    editor.autostart_check.setChecked(True)
+    editor._save()
+    app.processEvents()
+    stored = window.cfg.companion.presets[-1]
+    if stored.target_id != "bnk_selftest" or stored.timer_minutes != 8:
+        raise RuntimeError("Preset was not stored")
+    if window.cfg.companion.scene_map.get("partnergesprach") != "phase-partner":
+        raise RuntimeError("Scene assignment was not remembered")
+
+    again = PresetDialog(window, stored.preset_id)
+    if again.target_combo.currentData() != ("bank", "bnk_selftest"):
+        raise RuntimeError("Stored target was not preselected for editing")
+    again.reject()
+
+    window.manager_dialog.refresh_companion()
+    if window.manager_dialog.preset_list.count() != len(window.cfg.companion.presets):
+        raise RuntimeError("Preset list did not follow the configuration")
+    window.remove_preset(stored.preset_id)
+    if window.cfg.companion.preset(stored.preset_id) is not None:
+        raise RuntimeError("Preset was not removed")
+    window.manager_dialog.close()
+    app.processEvents()
+
+    preset = companion.Preset(
+        preset_id="selftest", name="Selbsttest", target_id="bnk_1",
+        phase_id=window.cfg.phase_items[1].item_id,
+        material_ids=[window.cfg.material_items[1].item_id],
+        timer_minutes=7, timer_autostart=True,
+    )
+    window._apply_preset_locally(preset)
+    if window.cfg.selected_phase_id != preset.phase_id:
+        raise RuntimeError("Preset did not set the social form")
+    if window.phase_timer.total_minutes() != 7:
+        raise RuntimeError("Preset did not start the timer")
+
+    window.companion.stop()
+    app.processEvents()
+    window.cfg.companion.enabled = False
+    window.cfg.show_boite = False
+    return port
 
 
 def run_self_test(app: QApplication) -> int:
@@ -2576,6 +3647,8 @@ def run_self_test(app: QApplication) -> int:
             if window.phase_timer.remaining_minutes() != 5:
                 raise RuntimeError("An expired timer did not restart on play")
 
+            companion_port = check_companion_module(window, app)
+
             window.audio.setVolume(0.5)
             media_player_available = window.player.isAvailable()
             window.close()
@@ -2597,6 +3670,7 @@ def run_self_test(app: QApplication) -> int:
             "media_player_available": media_player_available,
             "global_hotkeys_imported": GLOBAL_HOTKEYS_AVAILABLE,
             "classroom_modules_rendered": True,
+            "companion_port": companion_port,
             "bundled_icons": len(list(asset_icon_dir().glob("*.png"))),
         }))
         return 0
@@ -2647,6 +3721,7 @@ def main() -> int:
     try:
         win = SoundboardWindow()
         app.aboutToQuit.connect(win.hotkey_manager.stop)
+        app.aboutToQuit.connect(win.companion.stop)
         app.aboutToQuit.connect(win.player.stop)
         win.show()
         return app.exec()

@@ -152,10 +152,10 @@ jobs:
           app="dist/TeacherSoundboard.app"
           plist="$app/Contents/Info.plist"
           test -d "$app"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.5.0" "$plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 4.5.0" "$plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 4.5.0" "$plist" 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 4.5.0" "$plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 4.6.0" "$plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 4.6.0" "$plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 4.6.0" "$plist" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 4.6.0" "$plist"
           /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$plist" 2>/dev/null || \
             /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$plist"
           test "$(lipo -archs "$app/Contents/MacOS/TeacherSoundboard")" = "${{ matrix.arch }}"
